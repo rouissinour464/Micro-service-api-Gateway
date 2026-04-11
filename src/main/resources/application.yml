@@ -1,0 +1,55 @@
+server:
+  port: 8080
+
+spring:
+  cloud:
+    gateway:
+
+      ###########################################################
+      # ✅ CORS GLOBAL — VERSION CORRECTE POUR WEBFLUX GATEWAY
+      ###########################################################
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        corsConfigurations:
+          "[/**]":
+            allowedOrigins:
+              - "http://localhost:30081"   # ✅ Frontend NodePort K8s
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
+
+      ###########################################################
+      # ✅ ROUTES VERS auth-service (Kubernetes DNS)
+      ###########################################################
+      routes:
+
+        # ✅ /api/auth/**
+        - id: auth-service-auth
+          uri: http://auth-service:8081
+          predicates:
+            - Path=/api/auth/**
+          filters:
+            - StripPrefix=0
+
+        # ✅ /api/admin/**
+        - id: auth-service-admin
+          uri: http://auth-service:8081
+          predicates:
+            - Path=/api/admin/**
+          filters:
+            - StripPrefix=0
+
+        # ✅ /api/users/**
+        - id: auth-service-users
+          uri: http://auth-service:8081
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - StripPrefix=0
+
