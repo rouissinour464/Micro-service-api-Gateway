@@ -2,7 +2,8 @@ pipeline {
     agent any
 
     triggers {
-        cron('H/10 * * * *')
+        githubPush()
+        cron('H */10 * * *')   // ✅ toutes les 10 heures
     }
 
     tools {
@@ -26,21 +27,33 @@ pipeline {
 
         stage('Build JAR') {
             steps {
-                sh './mvnw clean package -DskipTests'
+                sh '''
+                    set -e
+                    chmod +x mvnw
+                    ./mvnw clean package -DskipTests
+                '''
             }
         }
 
         stage('Docker Build') {
             steps {
-                sh "docker build -t ${IMAGE}:${TAG} ."
+                sh '''
+                    set -e
+                    docker build -t ${IMAGE}:${TAG} .
+                '''
             }
         }
 
         stage('Docker Push') {
             steps {
-                withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
-                    sh "echo $DOCKER_PASSWORD | docker login -u ${REGISTRY} --password-stdin"
-                    sh "docker push ${IMAGE}:${TAG}"
+                withCredentials([
+                    string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')
+                ]) {
+                    sh '''
+                        set -e
+                        echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
+                        docker push ${IMAGE}:${TAG}
+                    '''
                 }
             }
         }
@@ -48,6 +61,7 @@ pipeline {
         stage('Deploy to K3s (Kustomize)') {
             steps {
                 sh '''
+                    set -e
                     echo "Using kubeconfig: $KUBECONFIG"
                     kubectl apply -k k8s
                 '''
@@ -57,7 +71,9 @@ pipeline {
         stage('Rollout Restart') {
             steps {
                 sh '''
+                    set -e
                     kubectl rollout restart deployment gateway-service -n gestion-projet
+                    kubectl rollout status deployment gateway-service -n gestion-projet --timeout=180s
                 '''
             }
         }
@@ -68,7 +84,7 @@ pipeline {
             echo "✅ API-GATEWAY DEPLOYED SUCCESSFULLY 🎉"
         }
         failure {
-            echo "❌ API-GATEWAY FAILED"
+            echo "❌ API-GATEWAY FAILED ❌"
         }
     }
 }
