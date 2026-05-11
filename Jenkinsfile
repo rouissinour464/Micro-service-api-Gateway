@@ -15,22 +15,19 @@ pipeline {
         IMAGE      = "${REGISTRY}/api-gateway"
         TAG        = "latest"
         KUBECONFIG = "/var/lib/jenkins/.kube/config"
+        NAMESPACE  = "gestion-projet"
     }
 
     stages {
 
-        /* =======================
-           SOURCE
-        ======================= */
+        /* ======================= */
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        /* =======================
-           BUILD
-        ======================= */
+        /* ======================= */
         stage('Build') {
             steps {
                 sh '''
@@ -41,9 +38,7 @@ pipeline {
             }
         }
 
-        /* =======================
-           TESTS UNITAIRES
-        ======================= */
+        /* ======================= */
         stage('Unit Tests') {
             steps {
                 sh '''
@@ -53,9 +48,7 @@ pipeline {
             }
         }
 
-        /* =======================
-           TESTS D’INTÉGRATION
-        ======================= */
+        /* ======================= */
         stage('Integration Tests') {
             steps {
                 sh '''
@@ -65,9 +58,7 @@ pipeline {
             }
         }
 
-        /* =======================
-           PACKAGE JAR
-        ======================= */
+        /* ======================= */
         stage('Package JAR') {
             steps {
                 sh '''
@@ -77,9 +68,7 @@ pipeline {
             }
         }
 
-        /* =======================
-           DOCKER
-        ======================= */
+        /* ======================= */
         stage('Docker Build') {
             steps {
                 sh '''
@@ -89,6 +78,7 @@ pipeline {
             }
         }
 
+        /* ======================= */
         stage('Docker Push') {
             steps {
                 withCredentials([
@@ -104,24 +94,36 @@ pipeline {
             }
         }
 
-        /* =======================
-           DEPLOY K3s (KUSTOMIZE)
-        ======================= */
+        /* ======================= */
         stage('Deploy to K3s (Kustomize)') {
             steps {
                 sh '''
                     set -eux
-                    kubectl apply -k k8s/app
+                    kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                    kubectl apply -k ./k8s/app
                 '''
             }
         }
 
+        /* ======================= */
+        stage('Update Image') {
+            steps {
+                sh '''
+                    set -eux
+                    kubectl set image deployment/gateway-service \
+                    gateway-service=${IMAGE}:${TAG} \
+                    -n ${NAMESPACE}
+                '''
+            }
+        }
+
+        /* ======================= */
         stage('Rollout Restart') {
             steps {
                 sh '''
                     set -eux
-                    kubectl rollout restart deployment gateway-service -n gestion-projet
-                    kubectl rollout status deployment gateway-service -n gestion-projet --timeout=180s
+                    kubectl rollout restart deployment gateway-service -n ${NAMESPACE}
+                    kubectl rollout status deployment gateway-service -n ${NAMESPACE} --timeout=180s
                 '''
             }
         }
@@ -129,7 +131,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ API‑GATEWAY BUILD + TESTS + DEPLOY SUCCESS ✅"
+            echo "✅ API-GATEWAY BUILD + TESTS + DEPLOY SUCCESS ✅"
         }
         failure {
             echo "❌ PIPELINE STOPPED (TESTS / BUILD FAILURE)"
