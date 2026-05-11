@@ -1,0 +1,60 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    gateway:
+
+      ###########################################################
+      # CORS GLOBAL
+      ###########################################################
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        corsConfigurations:
+          "[/**]":
+            allowedOrigins:
+              - "http://localhost:3000"
+              - "http://localhost:30081"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - PATCH
+              - DELETE
+              - OPTIONS
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
+
+      ###########################################################
+      # ROUTES MICROSERVICES
+      ###########################################################
+      routes:
+
+        # ───────── AUTH SERVICE ─────────
+        - id: auth-service
+          uri: http://auth-service:8081
+          predicates:
+            - Path=/api/auth/**,/api/users/**
+
+        # ───────── STAGE SERVICE ─────────
+        - id: stage-service
+          uri: http://stage-service:8082
+          predicates:
+            - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
+
+        # ───────── FILES SERVICE (FIX IMPORTANT) ─────────
+        - id: stage-files
+          uri: http://stage-service:8082
+          predicates:
+            - Path=/api/files/**
+
+###########################################################
+# LOGGING
+###########################################################
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
