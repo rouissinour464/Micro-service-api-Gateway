@@ -29,7 +29,7 @@ pipeline {
         }
 
         /* =======================
-           BUILD (sans tests)
+           BUILD
         ======================= */
         stage('Build') {
             steps {
@@ -98,19 +98,20 @@ pipeline {
                         set -eux
                         echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
                         docker push ${IMAGE}:${TAG}
+                        docker logout
                     '''
                 }
             }
         }
 
         /* =======================
-           DEPLOY K3s
+           DEPLOY K3s (KUSTOMIZE)
         ======================= */
         stage('Deploy to K3s (Kustomize)') {
             steps {
                 sh '''
                     set -eux
-                    kubectl apply -k k8s
+                    kubectl apply -k k8s/app
                 '''
             }
         }
