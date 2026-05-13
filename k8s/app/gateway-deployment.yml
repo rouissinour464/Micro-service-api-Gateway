@@ -19,3 +19,13 @@ spec:
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+          env:
+            - name: SPRING_CONFIG_LOCATION
+              value: "file:/app/config/application.yml"
+      volumes:
+        - name: config-volume
+          configMap:
+            name: gateway-config

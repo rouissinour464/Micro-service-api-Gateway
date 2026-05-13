@@ -1,60 +1,59 @@
-server:
-  port: 8080
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: gestion-projet
+data:
+  application.yml: |
+    server:
+      port: 8080
 
-spring:
-  application:
-    name: api-gateway
+    spring:
+      application:
+        name: api-gateway
 
-  cloud:
-    gateway:
+      cloud:
+        gateway:
 
-      ###########################################################
-      # CORS GLOBAL
-      ###########################################################
-      globalcors:
-        add-to-simple-url-handler-mapping: true
-        corsConfigurations:
-          "[/**]":
-            allowedOrigins:
-              - "http://localhost:3000"
-              - "http://localhost:30081"
-            allowedMethods:
-              - GET
-              - POST
-              - PUT
-              - PATCH
-              - DELETE
-              - OPTIONS
-            allowedHeaders: "*"
-            allowCredentials: true
-            maxAge: 3600
+          globalcors:
+            add-to-simple-url-handler-mapping: true
+            corsConfigurations:
+              "[/**]":
+                allowedOriginPatterns:
+                  - "http://localhost:*"
+                  - "http://127.0.0.1:*"
+                  - "http://172.25.240.54:*"
+                  - "http://172.16.0.10:*"
+                  - "http://172.*.*.*:*"
+                  - "http://192.168.*.*:*"
+                  - "http://10.*.*.*:*"
+                allowedMethods:
+                  - GET
+                  - POST
+                  - PUT
+                  - PATCH
+                  - DELETE
+                  - OPTIONS
+                allowedHeaders: "*"
+                allowCredentials: true
+                maxAge: 3600
 
-      ###########################################################
-      # ROUTES MICROSERVICES
-      ###########################################################
-      routes:
+          routes:
+            - id: auth-service
+              uri: http://auth-service:8081
+              predicates:
+                - Path=/api/auth/**,/api/users/**
 
-        # ───────── AUTH SERVICE ─────────
-        - id: auth-service
-          uri: http://auth-service:8081
-          predicates:
-            - Path=/api/auth/**,/api/users/**
+            - id: stage-service
+              uri: http://stage-service:8082
+              predicates:
+                - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
 
-        # ───────── STAGE SERVICE ─────────
-        - id: stage-service
-          uri: http://stage-service:8082
-          predicates:
-            - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
+            - id: stage-files
+              uri: http://stage-service:8082
+              predicates:
+                - Path=/api/files/**
 
-        # ───────── FILES SERVICE (FIX IMPORTANT) ─────────
-        - id: stage-files
-          uri: http://stage-service:8082
-          predicates:
-            - Path=/api/files/**
-
-###########################################################
-# LOGGING
-###########################################################
-logging:
-  level:
-    org.springframework.cloud.gateway: INFO
+    logging:
+      level:
+        org.springframework.cloud.gateway: INFO
