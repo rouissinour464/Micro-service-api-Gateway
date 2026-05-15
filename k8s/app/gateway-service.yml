@@ -4,10 +4,9 @@ metadata:
   name: gateway-service
   namespace: gestion-projet
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: gateway-service
   ports:
     - port: 8080
       targetPort: 8080
-      nodePort: 30080

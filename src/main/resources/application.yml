@@ -1,59 +1,57 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gateway-config
-  namespace: gestion-projet
-data:
-  application.yml: |
-    server:
-      port: 8080
+server:
+  port: 8080
 
-    spring:
-      application:
-        name: api-gateway
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+        - id: auth-service-auth
+          uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
+          predicates:
+            - Path=/api/auth/**
+          filters:
+            - StripPrefix=0
 
-      cloud:
-        gateway:
+        - id: auth-service-admin
+          uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
+          predicates:
+            - Path=/api/admin/**
+          filters:
+            - StripPrefix=0
 
-          globalcors:
-            add-to-simple-url-handler-mapping: true
-            corsConfigurations:
-              "[/**]":
-                allowedOriginPatterns:
-                  - "http://localhost:*"
-                  - "http://127.0.0.1:*"
-                  - "http://172.25.240.54:*"
-                  - "http://172.16.0.10:*"
-                  - "http://172.*.*.*:*"
-                  - "http://192.168.*.*:*"
-                  - "http://10.*.*.*:*"
-                allowedMethods:
-                  - GET
-                  - POST
-                  - PUT
-                  - PATCH
-                  - DELETE
-                  - OPTIONS
-                allowedHeaders: "*"
-                allowCredentials: true
-                maxAge: 3600
+        - id: auth-service-users
+          uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - StripPrefix=0
 
-          routes:
-            - id: auth-service
-              uri: http://auth-service:8081
-              predicates:
-                - Path=/api/auth/**,/api/users/**
+        - id: stage-service
+          uri: http://${STAGE_SERVICE_HOST:localhost}:${STAGE_SERVICE_PORT:8082}
+          predicates:
+            - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
+          filters:
+            - StripPrefix=0
 
-            - id: stage-service
-              uri: http://stage-service:8082
-              predicates:
-                - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
+        - id: stage-files
+          uri: http://${STAGE_SERVICE_HOST:localhost}:${STAGE_SERVICE_PORT:8082}
+          predicates:
+            - Path=/api/files/**
+          filters:
+            - StripPrefix=0
 
-            - id: stage-files
-              uri: http://stage-service:8082
-              predicates:
-                - Path=/api/files/**
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
 
-    logging:
-      level:
-        org.springframework.cloud.gateway: INFO
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
+    reactor.netty: WARN
