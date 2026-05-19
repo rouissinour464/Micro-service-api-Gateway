@@ -1,21 +1,13 @@
 ---
-# =============================================
-# STORAGE CLASS — local (hostPath)
-# Pas besoin de provisioner externe
-# =============================================
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: logging-local
-provisioner: kubernetes.io/no-provisioner   # PV manuel
-volumeBindingMode: WaitForFirstConsumer     # Bind seulement quand le pod est schedulé
-reclaimPolicy: Retain                       # Garder les données si PVC supprimé
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
 
 ---
-# =============================================
-# PERSISTENT VOLUME — OpenSearch
-# Stockage des index de logs sur le node
-# =============================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -29,22 +21,18 @@ spec:
     storage: 20Gi
   accessModes:
     - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain     # Données conservées après suppression PVC
+  persistentVolumeReclaimPolicy: Retain
   hostPath:
-    path: /data/opensearch-logs             # ← Créé automatiquement sur le node
+    path: /data/opensearch-logs
     type: DirectoryOrCreate
-  nodeAffinity:                             # Forcer OpenSearch sur le même node
+  nodeAffinity:
     required:
       nodeSelectorTerms:
         - matchExpressions:
             - key: kubernetes.io/hostname
-              operator: Exists              # ← Remplacer par le nom exact du node en prod
-                                            #   ex: operator: In / values: ["node-worker-1"]
+              operator: Exists
 
 ---
-# =============================================
-# PERSISTENT VOLUME CLAIM — OpenSearch
-# =============================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -61,13 +49,9 @@ spec:
       storage: 20Gi
   selector:
     matchLabels:
-      app: opensearch                       # Lié exactement au PV ci-dessus
+      app: opensearch
 
 ---
-# =============================================
-# PERSISTENT VOLUME — OpenSearch Dashboards
-# Stockage des configurations / index patterns
-# =============================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -93,9 +77,6 @@ spec:
               operator: Exists
 
 ---
-# =============================================
-# PERSISTENT VOLUME CLAIM — OpenSearch Dashboards
-# =============================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -115,11 +96,6 @@ spec:
       app: opensearch-dashboards
 
 ---
-# =============================================
-# PERSISTENT VOLUME — Fluent Bit DB
-# Stocke la position de lecture des logs
-# (évite de re-lire tous les logs au restart)
-# =============================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -132,16 +108,13 @@ spec:
   capacity:
     storage: 1Gi
   accessModes:
-    - ReadWriteMany                         # Partagé entre tous les pods DaemonSet
+    - ReadWriteMany
   persistentVolumeReclaimPolicy: Retain
   hostPath:
     path: /data/fluentbit-db
     type: DirectoryOrCreate
 
 ---
-# =============================================
-# PERSISTENT VOLUME CLAIM — Fluent Bit DB
-# =============================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

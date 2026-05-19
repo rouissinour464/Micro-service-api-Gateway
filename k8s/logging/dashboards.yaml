@@ -1,7 +1,4 @@
 ---
-# =============================================
-# CONFIGMAP — OpenSearch Dashboards
-# =============================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,9 +13,6 @@ data:
     opensearch.ssl.verificationMode: none
 
 ---
-# =============================================
-# SERVICE — Dashboards (NodePort 30601)
-# =============================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,56 +31,58 @@ spec:
   type: NodePort
 
 ---
-# =============================================
-# POD UNIQUE — OpenSearch Dashboards
-# Volume config → PVC persistant 2Gi
-# (sauvegarde index patterns, visualisations)
-# =============================================
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: opensearch-dashboards
   namespace: logging
   labels:
     app: opensearch-dashboards
 spec:
-  containers:
-    - name: dashboards
-      image: opensearchproject/opensearch-dashboards:2.13.0
-      ports:
-        - containerPort: 5601
-      env:
-        - name: OPENSEARCH_HOSTS
-          value: '["http://opensearch.logging.svc.cluster.local:9200"]'
-        - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
-          value: "true"
-      volumeMounts:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensearch-dashboards
+  template:
+    metadata:
+      labels:
+        app: opensearch-dashboards
+    spec:
+      containers:
+        - name: dashboards
+          image: opensearchproject/opensearch-dashboards:2.13.0
+          ports:
+            - containerPort: 5601
+          env:
+            - name: OPENSEARCH_HOSTS
+              value: '["http://opensearch.logging.svc.cluster.local:9200"]'
+            - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
+              value: "true"
+          volumeMounts:
+            - name: dashboards-storage
+              mountPath: /usr/share/opensearch-dashboards/data
+            - name: config
+              mountPath: /usr/share/opensearch-dashboards/config/opensearch_dashboards.yml
+              subPath: opensearch_dashboards.yml
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 5
+
+      volumes:
         - name: dashboards-storage
-          mountPath: /usr/share/opensearch-dashboards/data   # ← Config persistée sur PVC 2Gi
+          persistentVolumeClaim:
+            claimName: pvc-opensearch-dashboards
         - name: config
-          mountPath: /usr/share/opensearch-dashboards/config/opensearch_dashboards.yml
-          subPath: opensearch_dashboards.yml
-      resources:
-        requests:
-          memory: "256Mi"
-          cpu: "100m"
-        limits:
-          memory: "512Mi"
-          cpu: "250m"
-      readinessProbe:
-        httpGet:
-          path: /api/status
-          port: 5601
-        initialDelaySeconds: 60
-        periodSeconds: 15
-        failureThreshold: 5
-
-  volumes:
-    - name: dashboards-storage
-      persistentVolumeClaim:
-        claimName: pvc-opensearch-dashboards      # ← Branché sur PVC 2Gi
-    - name: config
-      configMap:
-        name: dashboards-config
-
-  restartPolicy: Always
+          configMap:
+            name: dashboards-config

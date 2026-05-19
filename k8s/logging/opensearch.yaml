@@ -1,7 +1,4 @@
 ---
-# =============================================
-# CONFIGMAP — OpenSearch
-# =============================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,9 +15,6 @@ data:
     thread_pool.search.queue_size: 100
 
 ---
-# =============================================
-# SERVICE — OpenSearch (interne cluster)
-# =============================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -38,12 +32,6 @@ spec:
   type: ClusterIP
 
 ---
-# =============================================
-# DEPLOYMENT — OpenSearch
-# Remplace le Pod nu : kubectl apply gère
-# désormais les mises à jour sans suppression
-# manuelle (rollout automatique)
-# =============================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:

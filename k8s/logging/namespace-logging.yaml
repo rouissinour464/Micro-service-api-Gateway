@@ -5,6 +5,7 @@ metadata:
   name: logging
   labels:
     name: logging
+
 ---
 apiVersion: v1
 kind: Secret

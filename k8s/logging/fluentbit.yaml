@@ -1,7 +1,4 @@
 ---
-# =============================================
-# RBAC — Fluent Bit
-# =============================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -33,11 +30,6 @@ subjects:
     namespace: logging
 
 ---
-# =============================================
-# CONFIGMAP — Fluent Bit
-# Credentials lus depuis variables d'env
-# (injectées via Secret opensearch-credentials)
-# =============================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -51,7 +43,6 @@ data:
         Log_Level     warn
         Parsers_File  parsers.conf
 
-    # ── INPUT : api-gateway ──
     [INPUT]
         Name              tail
         Tag               api-gateway
@@ -62,7 +53,6 @@ data:
         Skip_Long_Lines   On
         Refresh_Interval  10
 
-    # ── INPUT : micro-service-user ──
     [INPUT]
         Name              tail
         Tag               micro-service-user
@@ -73,7 +63,6 @@ data:
         Skip_Long_Lines   On
         Refresh_Interval  10
 
-    # ── FILTER : enrichir avec métadonnées K8s ──
     [FILTER]
         Name                kubernetes
         Match               *
@@ -86,7 +75,6 @@ data:
         Labels              On
         Annotations         Off
 
-    # ── OUTPUT : api-gateway → index dédié ──
     [OUTPUT]
         Name                opensearch
         Match               api-gateway
@@ -96,13 +84,12 @@ data:
         Logstash_Format     On
         Logstash_Prefix     api-gateway
         Logstash_DateFormat %Y.%m.%d
-        HTTP_User           ${OPENSEARCH_USER}     # ← Injecté depuis le Secret
-        HTTP_Passwd         ${OPENSEARCH_PASS}     # ← Injecté depuis le Secret
+        HTTP_User           ${OPENSEARCH_USER}
+        HTTP_Passwd         ${OPENSEARCH_PASS}
         tls                 Off
         Retry_Limit         3
         Suppress_Type_Name  On
 
-    # ── OUTPUT : micro-service-user → index dédié ──
     [OUTPUT]
         Name                opensearch
         Match               micro-service-user
@@ -134,11 +121,6 @@ data:
         Time_Keep   On
 
 ---
-# =============================================
-# DAEMONSET — Fluent Bit
-# spec.selector fixé : app: fluent-bit UNIQUEMENT
-# (kustomize labels n'injecte plus dedans)
-# =============================================
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -149,7 +131,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: fluent-bit          # ← Sélecteur minimal, immuable, ne sera plus modifié
+      app: fluent-bit
   template:
     metadata:
       labels:
@@ -165,12 +147,12 @@ spec:
         - name: fluent-bit
           image: fluent/fluent-bit:3.0
           env:
-            - name: OPENSEARCH_USER         # ← Variable injectée depuis le Secret
+            - name: OPENSEARCH_USER
               valueFrom:
                 secretKeyRef:
                   name: opensearch-credentials
                   key: username
-            - name: OPENSEARCH_PASS         # ← Variable injectée depuis le Secret
+            - name: OPENSEARCH_PASS
               valueFrom:
                 secretKeyRef:
                   name: opensearch-credentials
