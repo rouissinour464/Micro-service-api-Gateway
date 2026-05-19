@@ -22,12 +22,9 @@ spring:
         # AUTH SERVICE - AUTH
         # =========================
         - id: auth-service-auth
-
           uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
-
           predicates:
             - Path=/api/auth/**
-
           filters:
             - StripPrefix=0
 
@@ -35,12 +32,9 @@ spring:
         # AUTH SERVICE - ADMIN
         # =========================
         - id: auth-service-admin
-
           uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
-
           predicates:
             - Path=/api/admin/**
-
           filters:
             - StripPrefix=0
 
@@ -48,12 +42,9 @@ spring:
         # AUTH SERVICE - USERS
         # =========================
         - id: auth-service-users
-
           uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
-
           predicates:
             - Path=/api/users/**
-
           filters:
             - StripPrefix=0
 
@@ -61,12 +52,9 @@ spring:
         # STAGE SERVICE API
         # =========================
         - id: stage-service
-
           uri: http://${STAGE_SERVICE_HOST:localhost}:${STAGE_SERVICE_PORT:8082}
-
           predicates:
             - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
-
           filters:
             - StripPrefix=0
 
@@ -74,12 +62,9 @@ spring:
         # FILE STORAGE API
         # =========================
         - id: stage-files
-
           uri: http://${STAGE_SERVICE_HOST:localhost}:${STAGE_SERVICE_PORT:8082}
-
           predicates:
             - Path=/api/files/**
-
           filters:
             - StripPrefix=0
 
@@ -87,16 +72,29 @@ spring:
 # ACTUATOR & PROMETHEUS
 # =========================
 management:
-
   endpoints:
     web:
       exposure:
         include: health,info,prometheus
-
   endpoint:
     health:
       show-details: always
-
   metrics:
     tags:
       application: api-gateway
+
+# =========================
+# LOGGING — JSON pour Fluent Bit → OpenSearch
+# =========================
+logging:
+  level:
+    root: INFO
+    org.springframework.cloud.gateway: INFO
+    org.springframework.security: INFO
+    reactor.netty.http.client: WARN       # Évite le bruit des requêtes HTTP internes
+    reactor.netty.http.server: INFO
+
+  # Format JSON structuré — parsé directement par Fluent Bit
+  pattern:
+    console: |
+      {"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z',UTC}","level":"%level","service":"api-gateway","thread":"%thread","logger":"%logger{40}","message":"%replace(%msg){'\"','\\\"'}","trace":"%X{traceId:-}","span":"%X{spanId:-}"}%n

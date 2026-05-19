@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  logback-spring.xml — api-gateway
+  Place dans : src/main/resources/logback-spring.xml
+  Émet des logs JSON ligne par ligne → Fluent Bit les parse → OpenSearch
+-->
+<configuration>
+
+    <!-- ========================= -->
+    <!-- APPENDER : Console JSON   -->
+    <!-- ========================= -->
+    <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>{"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z',UTC}","level":"%level","service":"api-gateway","thread":"%thread","logger":"%logger{40}","message":"%replace(%msg){'&quot;','\\&quot;'}","trace":"%X{traceId:-}","span":"%X{spanId:-}"}%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ========================= -->
+    <!-- LOGGERS SPÉCIFIQUES       -->
+    <!-- ========================= -->
+
+    <!-- Routes Spring Cloud Gateway -->
+    <logger name="org.springframework.cloud.gateway" level="INFO" additivity="false">
+        <appender-ref ref="JSON_CONSOLE"/>
+    </logger>
+
+    <!-- Netty HTTP (requêtes entrantes/sortantes) -->
+    <logger name="reactor.netty.http.server" level="INFO" additivity="false">
+        <appender-ref ref="JSON_CONSOLE"/>
+    </logger>
+
+    <!-- Réduire le bruit client HTTP interne -->
+    <logger name="reactor.netty.http.client" level="WARN" additivity="false">
+        <appender-ref ref="JSON_CONSOLE"/>
+    </logger>
+
+    <!-- Spring Security -->
+    <logger name="org.springframework.security" level="INFO" additivity="false">
+        <appender-ref ref="JSON_CONSOLE"/>
+    </logger>
+
+    <!-- ========================= -->
+    <!-- ROOT                      -->
+    <!-- ========================= -->
+    <root level="INFO">
+        <appender-ref ref="JSON_CONSOLE"/>
+    </root>
+
+</configuration>

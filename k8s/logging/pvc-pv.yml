@@ -1,0 +1,161 @@
+---
+# =============================================
+# STORAGE CLASS — local (hostPath)
+# Pas besoin de provisioner externe
+# =============================================
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: logging-local
+provisioner: kubernetes.io/no-provisioner   # PV manuel
+volumeBindingMode: WaitForFirstConsumer     # Bind seulement quand le pod est schedulé
+reclaimPolicy: Retain                       # Garder les données si PVC supprimé
+
+---
+# =============================================
+# PERSISTENT VOLUME — OpenSearch
+# Stockage des index de logs sur le node
+# =============================================
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-opensearch-logs
+  labels:
+    app: opensearch
+    type: logging
+spec:
+  storageClassName: logging-local
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain     # Données conservées après suppression PVC
+  hostPath:
+    path: /data/opensearch-logs             # ← Créé automatiquement sur le node
+    type: DirectoryOrCreate
+  nodeAffinity:                             # Forcer OpenSearch sur le même node
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists              # ← Remplacer par le nom exact du node en prod
+                                            #   ex: operator: In / values: ["node-worker-1"]
+
+---
+# =============================================
+# PERSISTENT VOLUME CLAIM — OpenSearch
+# =============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-opensearch-logs
+  namespace: logging
+  labels:
+    app: opensearch
+spec:
+  storageClassName: logging-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  selector:
+    matchLabels:
+      app: opensearch                       # Lié exactement au PV ci-dessus
+
+---
+# =============================================
+# PERSISTENT VOLUME — OpenSearch Dashboards
+# Stockage des configurations / index patterns
+# =============================================
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-opensearch-dashboards
+  labels:
+    app: opensearch-dashboards
+    type: logging
+spec:
+  storageClassName: logging-local
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /data/opensearch-dashboards
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+
+---
+# =============================================
+# PERSISTENT VOLUME CLAIM — OpenSearch Dashboards
+# =============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-opensearch-dashboards
+  namespace: logging
+  labels:
+    app: opensearch-dashboards
+spec:
+  storageClassName: logging-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  selector:
+    matchLabels:
+      app: opensearch-dashboards
+
+---
+# =============================================
+# PERSISTENT VOLUME — Fluent Bit DB
+# Stocke la position de lecture des logs
+# (évite de re-lire tous les logs au restart)
+# =============================================
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-fluentbit-db
+  labels:
+    app: fluent-bit
+    type: logging
+spec:
+  storageClassName: logging-local
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany                         # Partagé entre tous les pods DaemonSet
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /data/fluentbit-db
+    type: DirectoryOrCreate
+
+---
+# =============================================
+# PERSISTENT VOLUME CLAIM — Fluent Bit DB
+# =============================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-fluentbit-db
+  namespace: logging
+  labels:
+    app: fluent-bit
+spec:
+  storageClassName: logging-local
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  selector:
+    matchLabels:
+      app: fluent-bit
