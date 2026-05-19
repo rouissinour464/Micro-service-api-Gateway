@@ -39,87 +39,96 @@ spec:
 
 ---
 # =============================================
-# POD UNIQUE — OpenSearch
-# Volume data → PVC persistant 20Gi
+# DEPLOYMENT — OpenSearch
+# Remplace le Pod nu : kubectl apply gère
+# désormais les mises à jour sans suppression
+# manuelle (rollout automatique)
 # =============================================
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: opensearch
   namespace: logging
   labels:
     app: opensearch
 spec:
-  initContainers:
-    - name: fix-vm-map
-      image: busybox:1.35
-      command: ["sysctl", "-w", "vm.max_map_count=262144"]
-      securityContext:
-        privileged: true
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensearch
+  template:
+    metadata:
+      labels:
+        app: opensearch
+    spec:
+      initContainers:
+        - name: fix-vm-map
+          image: busybox:1.35
+          command: ["sysctl", "-w", "vm.max_map_count=262144"]
+          securityContext:
+            privileged: true
 
-    - name: fix-permissions
-      image: busybox:1.35
-      command: ["chown", "-R", "1000:1000", "/usr/share/opensearch/data"]
-      volumeMounts:
-        - name: data
-          mountPath: /usr/share/opensearch/data
+        - name: fix-permissions
+          image: busybox:1.35
+          command: ["chown", "-R", "1000:1000", "/usr/share/opensearch/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
 
-  containers:
-    - name: opensearch
-      image: opensearchproject/opensearch:2.13.0
-      ports:
-        - containerPort: 9200
-          name: http
-      env:
-        - name: OPENSEARCH_JAVA_OPTS
-          value: "-Xms512m -Xmx512m"
-        - name: DISABLE_SECURITY_PLUGIN
-          value: "true"
-        - name: discovery.type
-          value: single-node
-        - name: OPENSEARCH_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: opensearch-credentials
-              key: username
-        - name: OPENSEARCH_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: opensearch-credentials
-              key: password
-      volumeMounts:
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.13.0
+          ports:
+            - containerPort: 9200
+              name: http
+          env:
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+            - name: discovery.type
+              value: single-node
+            - name: OPENSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: opensearch-credentials
+                  key: username
+            - name: OPENSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: opensearch-credentials
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
+            - name: config
+              mountPath: /usr/share/opensearch/config/opensearch.yml
+              subPath: opensearch.yml
+          resources:
+            requests:
+              memory: "768Mi"
+              cpu: "250m"
+            limits:
+              memory: "1228Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 90
+            periodSeconds: 20
+
+      volumes:
         - name: data
-          mountPath: /usr/share/opensearch/data
+          persistentVolumeClaim:
+            claimName: pvc-opensearch-logs
         - name: config
-          mountPath: /usr/share/opensearch/config/opensearch.yml
-          subPath: opensearch.yml
-      resources:
-        requests:
-          memory: "768Mi"
-          cpu: "250m"
-        limits:
-          memory: "1228Mi"    # ← Corrigé : 1.2Gi → 1228Mi (entier)
-          cpu: "500m"
-      readinessProbe:
-        httpGet:
-          path: /_cluster/health
-          port: 9200
-        initialDelaySeconds: 45
-        periodSeconds: 10
-        failureThreshold: 6
-      livenessProbe:
-        httpGet:
-          path: /_cluster/health
-          port: 9200
-        initialDelaySeconds: 90
-        periodSeconds: 20
-
-  volumes:
-    - name: data
-      persistentVolumeClaim:
-        claimName: pvc-opensearch-logs
-    - name: config
-      configMap:
-        name: opensearch-config
-
-  restartPolicy: Always
+          configMap:
+            name: opensearch-config
