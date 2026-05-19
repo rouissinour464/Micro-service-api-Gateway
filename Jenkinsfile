@@ -3,7 +3,7 @@ pipeline {
 
     triggers {
         githubPush()
-        cron('H */10 * * *')   // ⏱ toutes les 10 heures
+        cron('H */10 * * *')
     }
 
     tools {
@@ -13,102 +13,77 @@ pipeline {
     environment {
         REGISTRY   = "nour292"
         IMAGE      = "${REGISTRY}/api-gateway"
-        TAG        = "latest"
+        TAG        = "${BUILD_NUMBER}"
         KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+        SONAR_PROJECT_KEY = "rouissinour464_micro-service-api-gateway"
+        SONAR_ORG = "rouissinour464"
+    }
+
+    options {
+        timestamps()
     }
 
     stages {
 
-        /* =======================
-           CHECKOUT SOURCE
-        ======================= */
+        /* ===================== */
         stage('Checkout') {
             steps {
                 checkout scm
-
-                sh '''
-                    set -eux
-                    pwd
-                    ls -R
-                '''
             }
         }
 
-        /* =======================
-           BUILD
-        ======================= */
-        stage('Build') {
+        /* ===================== */
+        stage('Build + Test') {
             steps {
                 sh '''
                     set -eux
                     chmod +x mvnw
-                    ./mvnw clean compile
+                    ./mvnw clean verify
                 '''
             }
         }
 
-        /* =======================
-           UNIT TESTS
-        ======================= */
-        stage('Unit Tests') {
+        /* ===================== */
+        stage('SonarCloud') {
             steps {
-                sh '''
-                    set -eux
-                    ./mvnw test
-                '''
+                withSonarQubeEnv('SonarCloud') {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            ./mvnw sonar:sonar \
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.organization=${SONAR_ORG} \
+                            -Dsonar.host.url=https://sonarcloud.io \
+                            -Dsonar.login=${SONAR_TOKEN}
+                        '''
+                    }
+                }
             }
         }
 
-        /* =======================
-           INTEGRATION TESTS
-        ======================= */
-        stage('Integration Tests') {
+        /* ===================== */
+        stage('Quality Gate') {
             steps {
-                sh '''
-                    set -eux
-                    ./mvnw verify
-                '''
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
             }
         }
 
-        /* =======================
-           PACKAGE JAR
-        ======================= */
-        stage('Package JAR') {
+        /* ===================== */
+        stage('Docker Build & Push') {
             steps {
-                sh '''
-                    set -eux
-                    ./mvnw package -DskipTests
-                '''
-            }
-        }
-
-        /* =======================
-           DOCKER BUILD
-        ======================= */
-        stage('Docker Build') {
-            steps {
-                sh '''
-                    set -eux
-                    docker build -t ${IMAGE}:${TAG} .
-                '''
-            }
-        }
-
-        /* =======================
-           DOCKER PUSH
-        ======================= */
-        stage('Docker Push') {
-            steps {
-                withCredentials([
-                    string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')
-                ]) {
+                withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
                     sh '''
                         set -eux
 
                         echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
 
+                        docker build -t ${IMAGE}:${TAG} .
+                        docker tag ${IMAGE}:${TAG} ${IMAGE}:latest
+
                         docker push ${IMAGE}:${TAG}
+                        docker push ${IMAGE}:latest
 
                         docker logout
                     '''
@@ -116,46 +91,46 @@ pipeline {
             }
         }
 
-        /* =======================
-           VERIFY K8S FILES
-        ======================= */
-        stage('Verify K8s Files') {
+        /* ===================== */
+        stage('Check Cluster Nodes') {
             steps {
                 sh '''
                     set -eux
 
-                    ls -R k8s
+                    echo "=== CHECK NODES ==="
+                    kubectl get nodes
 
-                    test -f k8s/app/gateway-deployment.yml
-                    test -f k8s/app/gateway-service.yml
-                    test -f k8s/app/kustomization.yaml
+                    # Vérifier si tous Ready
+                    NOT_READY=$(kubectl get nodes --no-headers | grep -v " Ready" || true)
+
+                    if [ ! -z "$NOT_READY" ]; then
+                      echo "❌ Some nodes NOT READY"
+                      kubectl get nodes
+                      exit 1
+                    fi
+
+                    echo "✅ ALL NODES READY"
                 '''
             }
         }
 
-        /* =======================
-           DEPLOY K3s
-        ======================= */
-        stage('Deploy to K3s (Kustomize)') {
+        /* ===================== */
+        stage('Deploy K3s') {
             steps {
                 sh '''
                     set -eux
-
                     kubectl apply -k k8s/app
                 '''
             }
         }
 
-        /* =======================
-           ROLLOUT RESTART
-        ======================= */
+        /* ===================== */
         stage('Rollout Restart') {
             steps {
                 sh '''
                     set -eux
 
                     kubectl rollout restart deployment gateway-service -n gestion-projet
-
                     kubectl rollout status deployment gateway-service -n gestion-projet --timeout=180s
                 '''
             }
@@ -163,13 +138,19 @@ pipeline {
     }
 
     post {
-
         success {
-            echo "✅ API-GATEWAY BUILD + TESTS + DEPLOY SUCCESS ✅"
+            echo "✅ API-GATEWAY FULL PIPELINE SUCCESS 🚀"
         }
 
         failure {
-            echo "❌ PIPELINE STOPPED (TESTS / BUILD FAILURE)"
+            echo "❌ PIPELINE FAILED"
+
+            sh '''
+                echo "=== DEBUG CLUSTER ==="
+                kubectl get pods -n gestion-projet || true
+                kubectl describe pods -n gestion-projet || true
+                kubectl get events -n gestion-projet || true
+            '''
         }
 
         always {
