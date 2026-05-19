@@ -35,7 +35,8 @@ subjects:
 ---
 # =============================================
 # CONFIGMAP — Fluent Bit
-# Collecte : api-gateway + micro-service-user
+# Credentials lus depuis variables d'env
+# (injectées via Secret opensearch-credentials)
 # =============================================
 apiVersion: v1
 kind: ConfigMap
@@ -56,7 +57,7 @@ data:
         Tag               api-gateway
         Path              /var/log/containers/*micro-service-api-gateway*.log
         Parser            docker
-        DB                /var/fluentbit-db/flb_api_gateway.db   # ← Persisté sur PVC
+        DB                /var/fluentbit-db/flb_api_gateway.db
         Mem_Buf_Limit     10MB
         Skip_Long_Lines   On
         Refresh_Interval  10
@@ -67,7 +68,7 @@ data:
         Tag               micro-service-user
         Path              /var/log/containers/*micro-service-user*.log
         Parser            docker
-        DB                /var/fluentbit-db/flb_user.db          # ← Persisté sur PVC
+        DB                /var/fluentbit-db/flb_user.db
         Mem_Buf_Limit     10MB
         Skip_Long_Lines   On
         Refresh_Interval  10
@@ -95,8 +96,8 @@ data:
         Logstash_Format     On
         Logstash_Prefix     api-gateway
         Logstash_DateFormat %Y.%m.%d
-        HTTP_User           admin
-        HTTP_Passwd         Admin@Logs2024
+        HTTP_User           ${OPENSEARCH_USER}     # ← Injecté depuis le Secret
+        HTTP_Passwd         ${OPENSEARCH_PASS}     # ← Injecté depuis le Secret
         tls                 Off
         Retry_Limit         3
         Suppress_Type_Name  On
@@ -111,8 +112,8 @@ data:
         Logstash_Format     On
         Logstash_Prefix     micro-service-user
         Logstash_DateFormat %Y.%m.%d
-        HTTP_User           admin
-        HTTP_Passwd         Admin@Logs2024
+        HTTP_User           ${OPENSEARCH_USER}
+        HTTP_Passwd         ${OPENSEARCH_PASS}
         tls                 Off
         Retry_Limit         3
         Suppress_Type_Name  On
@@ -135,7 +136,8 @@ data:
 ---
 # =============================================
 # DAEMONSET — Fluent Bit
-# DB de position montée sur PVC partagé
+# spec.selector fixé : app: fluent-bit UNIQUEMENT
+# (kustomize labels n'injecte plus dedans)
 # =============================================
 apiVersion: apps/v1
 kind: DaemonSet
@@ -147,7 +149,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: fluent-bit
+      app: fluent-bit          # ← Sélecteur minimal, immuable, ne sera plus modifié
   template:
     metadata:
       labels:
@@ -162,6 +164,17 @@ spec:
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:3.0
+          env:
+            - name: OPENSEARCH_USER         # ← Variable injectée depuis le Secret
+              valueFrom:
+                secretKeyRef:
+                  name: opensearch-credentials
+                  key: username
+            - name: OPENSEARCH_PASS         # ← Variable injectée depuis le Secret
+              valueFrom:
+                secretKeyRef:
+                  name: opensearch-credentials
+                  key: password
           volumeMounts:
             - name: varlog
               mountPath: /var/log
@@ -171,7 +184,7 @@ spec:
             - name: config
               mountPath: /fluent-bit/etc/
             - name: fluentbit-db
-              mountPath: /var/fluentbit-db              # ← DB persistée sur PVC 1Gi
+              mountPath: /var/fluentbit-db
           resources:
             requests:
               memory: "32Mi"
@@ -191,5 +204,5 @@ spec:
             name: fluent-bit-config
         - name: fluentbit-db
           persistentVolumeClaim:
-            claimName: pvc-fluentbit-db               # ← Branché sur PVC 1Gi
+            claimName: pvc-fluentbit-db
       terminationGracePeriodSeconds: 10

@@ -1,4 +1,3 @@
-
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -11,7 +10,11 @@ resources:
   - dashboards.yaml
   - fluentbit.yaml
 
-commonLabels:
-  project: gestion-de-stage
-  component: logging
-  managed-by: kustomize
+# ← Remplace commonLabels (déprécié + modifie les sélecteurs)
+labels:
+  - pairs:
+      project: gestion-de-stage
+      component: logging
+      managed-by: kustomize
+    includeSelectors: false   # ← Ne touche pas spec.selector (champ immuable)
+    includeTemplates: true    # ← Applique aux pod templates
