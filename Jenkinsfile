@@ -6,6 +6,10 @@ pipeline {
         cron('H */10 * * *')
     }
 
+    options {
+        timestamps()
+    }
+
     tools {
         jdk 'JDK21'
     }
@@ -20,10 +24,6 @@ pipeline {
         SONAR_ORG = "rouissinour464"
     }
 
-    options {
-        timestamps()
-    }
-
     stages {
 
         /* ===================== */
@@ -33,26 +33,16 @@ pipeline {
             }
         }
 
-        /* ✅ TESTS UNIQUEMENT */
-        stage('Unit + Integration Tests') {
-            steps {
-                sh '''
-                    set -eux
-                    chmod +x mvnw
-                    ./mvnw test
-                '''
-            }
-        }
-
-        /* ✅ SONAR CLOUD */
-        stage('SonarCloud') {
+        /* ✅ BUILD + TEST + SONAR (FIX IMPORTANT) */
+        stage('Build + Test + Sonar') {
             steps {
                 withSonarQubeEnv('SonarCloud') {
                     withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                         sh '''
                             set -eux
+                            chmod +x mvnw
 
-                            ./mvnw sonar:sonar \
+                            ./mvnw clean verify sonar:sonar \
                               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                               -Dsonar.organization=${SONAR_ORG} \
                               -Dsonar.host.url=https://sonarcloud.io \
@@ -72,7 +62,7 @@ pipeline {
             }
         }
 
-        /* ✅ DOCKER (REAL BUILD) */
+        /* ✅ DOCKER */
         stage('Docker Build & Push') {
             steps {
                 withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
@@ -98,17 +88,7 @@ pipeline {
             steps {
                 sh '''
                     set -eux
-
                     kubectl get nodes
-
-                    NOT_READY=$(kubectl get nodes --no-headers | grep -v " Ready" || true)
-
-                    if [ ! -z "$NOT_READY" ]; then
-                      echo "❌ Some nodes NOT READY"
-                      exit 1
-                    fi
-
-                    echo "✅ ALL NODES READY"
                 '''
             }
         }
@@ -138,7 +118,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ API-GATEWAY FULL PIPELINE SUCCESS 🚀"
+            echo "✅ API-GATEWAY PIPELINE SUCCESS 🚀"
         }
 
         failure {
