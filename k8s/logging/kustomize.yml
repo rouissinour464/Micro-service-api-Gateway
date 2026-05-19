@@ -11,11 +11,11 @@ namespace: logging
 # Kustomize applique dans cet ordre
 # =============================================
 resources:
-  - namespace-logging.yaml   # 1. Namespace + Secret
-  - pv-pvc.yaml              # 2. PV + PVC (avant les pods !)
-  - opensearch.yaml          # 3. Pod OpenSearch
-  - dashboards.yaml          # 4. Pod Dashboards
-  - fluentbit.yaml           # 5. DaemonSet Fluent Bit + RBAC
+  - namespace-logging.yml   # 1. Namespace + Secret
+  -  pvc-pv.yml              # 2. PV + PVC (avant les pods !)
+  - opensearch.yml          # 3. Pod OpenSearch
+  - dashboards.yml          # 4. Pod Dashboards
+  - fluentbit.yml           # 5. DaemonSet Fluent Bit + RBAC
 
 # =============================================
 # LABELS COMMUNS appliqués à toutes les ressources
