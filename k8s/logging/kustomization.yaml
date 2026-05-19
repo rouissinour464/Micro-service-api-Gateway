@@ -1,0 +1,17 @@
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: logging
+
+resources:
+  - namespace-logging.yaml
+  - pv-pvc.yaml
+  - opensearch.yaml
+  - dashboards.yaml
+  - fluentbit.yaml
+
+commonLabels:
+  project: gestion-de-stage
+  component: logging
+  managed-by: kustomize
