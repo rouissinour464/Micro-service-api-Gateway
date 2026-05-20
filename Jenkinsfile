@@ -84,13 +84,37 @@ pipeline {
             steps {
                 sh '''
                     set -eux
+                    echo "📦 Nettoyage PV/PVC bloqués si nécessaire..."
+
+                    for pv in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
+                        STATUS=$(kubectl get pv $pv \
+                            -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                        if [ "$STATUS" = "Released" ]; then
+                            echo "⚠️  PV $pv Released → libération claimRef"
+                            kubectl patch pv $pv \
+                                --type=json \
+                                -p='[{"op":"remove","path":"/spec/claimRef"}]'
+                        fi
+                    done
+
+                    for pvc in pvc-opensearch-logs pvc-opensearch-dashboards pvc-fluentbit-db; do
+                        STATUS=$(kubectl get pvc $pvc -n ${LOGGING_NAMESPACE} \
+                            -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                        if [ "$STATUS" = "Terminating" ]; then
+                            echo "⚠️  PVC $pvc Terminating → forçage suppression"
+                            kubectl patch pvc $pvc -n ${LOGGING_NAMESPACE} \
+                                --type=json \
+                                -p='[{"op":"remove","path":"/metadata/finalizers"}]' || true
+                        fi
+                    done
+
                     echo "📦 Déploiement de la stack logging..."
                     kubectl apply -k k8s/logging
 
                     echo "⏳ Attente OpenSearch..."
                     kubectl rollout status deployment/opensearch \
                         --namespace=${LOGGING_NAMESPACE} \
-                        --timeout=180s
+                        --timeout=300s
 
                     echo "⏳ Attente OpenSearch Dashboards..."
                     kubectl rollout status deployment/opensearch-dashboards \
