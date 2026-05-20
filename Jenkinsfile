@@ -147,15 +147,16 @@ pipeline {
                         for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
                             STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
                             if [ "$STATUS" = "Released" ]; then
-                                echo "🔧 PV $PV Released → patch claimRef null"
+                                echo "🔧 PV $PV Released → libération"
                                 kubectl patch pv $PV --type=json \
                                     -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
                             fi
                         done
 
-                        # ✅ Créer les dossiers hostPath si absents
-                        mkdir -p /data/opensearch-logs /data/opensearch-dashboards /data/fluentbit-db
-                        chmod -R 777 /data
+                        # ✅ Créer dossiers SANS chmod (permissions déjà fixées sur la VM)
+                        mkdir -p /data/opensearch-logs \
+                                 /data/opensearch-dashboards \
+                                 /data/fluentbit-db || true
 
                         if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
                             echo "✅ Logging déjà installé"
@@ -168,7 +169,7 @@ pipeline {
             }
         }
 
-        // ✅ WAIT SAFE (JAMAIS FAIL)
+        // ✅ WAIT SAFE — JAMAIS FAIL
         stage('Wait Logging Ready') {
             steps {
                 sh '''
@@ -205,7 +206,7 @@ pipeline {
                     kubectl get pvc -n ${LOGGING_NS}
 
                     echo "=== PVs ==="
-                    kubectl get pv | grep logging-local
+                    kubectl get pv | grep logging-local || true
                 '''
             }
         }
