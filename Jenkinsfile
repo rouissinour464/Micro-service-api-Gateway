@@ -133,15 +133,29 @@ pipeline {
             }
         }
 
-        // ✅ SAFE INSTALL LOGGING (1 seule fois)
+        // ✅ DEPLOY LOGGING — FIX PV RELEASED AUTOMATIQUE
         stage('Deploy Logging') {
             steps {
-                timeout(time: 3, unit: 'MINUTES') {
+                timeout(time: 5, unit: 'MINUTES') {
                     sh '''
                         set -eux
 
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
+
+                        # ✅ FIX DEFINITIF : libérer les PVs Released avant apply
+                        for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
+                            STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                            if [ "$STATUS" = "Released" ]; then
+                                echo "🔧 PV $PV Released → patch claimRef null"
+                                kubectl patch pv $PV --type=json \
+                                    -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
+                            fi
+                        done
+
+                        # ✅ Créer les dossiers hostPath si absents
+                        mkdir -p /data/opensearch-logs /data/opensearch-dashboards /data/fluentbit-db
+                        chmod -R 777 /data
 
                         if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
                             echo "✅ Logging déjà installé"
@@ -162,24 +176,17 @@ pipeline {
 
                     if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
 
-                        echo "⏳ OpenSearch check (60s max)"
-                        kubectl rollout status deployment/opensearch -n ${LOGGING_NS} --timeout=60s || true
+                        echo "⏳ OpenSearch check (120s max)"
+                        kubectl rollout status deployment/opensearch \
+                            -n ${LOGGING_NS} --timeout=120s || true
 
-                        echo "⏳ Dashboards check (60s max)"
-                        kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS} --timeout=60s || true
+                        echo "⏳ Dashboards check (120s max)"
+                        kubectl rollout status deployment/opensearch-dashboards \
+                            -n ${LOGGING_NS} --timeout=120s || true
 
                     else
                         echo "Logging not installed → skip"
                     fi
-                '''
-            }
-        }
-
-        // ✅ Restart SAFE
-        stage('Restart Logging') {
-            steps {
-                sh '''
-                    echo "⚠️ Restart logging ignoré pour éviter bug PVC"
                 '''
             }
         }
@@ -193,6 +200,12 @@ pipeline {
 
                     echo "=== LOGGING PODS ==="
                     kubectl get pods -n ${LOGGING_NS}
+
+                    echo "=== PVCs ==="
+                    kubectl get pvc -n ${LOGGING_NS}
+
+                    echo "=== PVs ==="
+                    kubectl get pv | grep logging-local
                 '''
             }
         }
@@ -203,14 +216,20 @@ pipeline {
                 sh '''
                     set -eux
 
-                    kubectl run log-test --image=busybox --restart=Never -- echo "hello logs" || true
+                    kubectl run log-test --image=busybox --restart=Never \
+                        -- echo "hello logs" || true
                     sleep 5
 
-                    kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 > /dev/null 2>&1 &
+                    kubectl port-forward -n ${LOGGING_NS} svc/opensearch \
+                        9200:9200 > /dev/null 2>&1 &
                     sleep 5
 
                     echo "=== INDICES ==="
                     curl -s localhost:9200/_cat/indices?v || true
+
+                    # cleanup
+                    kubectl delete pod log-test --ignore-not-found=true
+                    pkill -f "port-forward.*9200" || true
                 '''
             }
         }
@@ -226,9 +245,11 @@ pipeline {
 
             sh '''
                 kubectl get pods -A || true
-                kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=100 || true
-                kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=100 || true
-                kubectl logs -l app=fluent-bit -n ${LOGGING_NS} --tail=100 || true
+                kubectl get pvc -n logging || true
+                kubectl get pv | grep logging-local || true
+                kubectl logs -l app=opensearch -n logging --tail=100 || true
+                kubectl logs -l app=opensearch-dashboards -n logging --tail=100 || true
+                kubectl logs -l app=fluent-bit -n logging --tail=100 || true
             '''
         }
 
