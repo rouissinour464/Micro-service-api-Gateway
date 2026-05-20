@@ -139,7 +139,7 @@ pipeline {
             }
         }
 
-        // ✅ DEPLOY LOGGING SAFE (NE SE REDEPLoie PAS)
+        // ✅ DEPLOY LOGGING SAFE
         stage('Deploy Logging (Safe)') {
             steps {
                 timeout(time: 3, unit: 'MINUTES') {
@@ -152,7 +152,7 @@ pipeline {
                         if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
                             echo "✅ Logging déjà installé → SKIP"
                         else
-                            echo "🚀 Installation logging (1 seule fois)"
+                            echo "🚀 Installation logging"
                             kubectl apply -k k8s/logging
                         fi
                     '''
@@ -160,15 +160,18 @@ pipeline {
             }
         }
 
-        // ✅ WAIT SAFE
+        // ✅ WAIT SAFE (NE CASSE PAS LE PIPELINE)
         stage('Wait Logging Ready') {
             steps {
                 sh '''
                     set -eux
 
                     if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
-                        kubectl rollout status deployment/opensearch -n ${LOGGING_NS}
-                        kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS}
+                        echo "⏳ Waiting OpenSearch..."
+                        kubectl rollout status deployment/opensearch -n ${LOGGING_NS} || true
+
+                        echo "⏳ Waiting Dashboards..."
+                        kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS} || true
                     else
                         echo "Logging not installed → skip"
                     fi
@@ -176,11 +179,11 @@ pipeline {
             }
         }
 
-        // ✅ RESTART DÉSACTIVÉ (EVITE BUG PVC)
+        // ✅ RESTART DÉSACTIVÉ
         stage('Restart Logging') {
             steps {
                 sh '''
-                    echo "⚠️ Restart logging désactivé pour éviter problème PVC"
+                    echo "⚠️ Restart logging disabled"
                 '''
             }
         }
@@ -199,7 +202,7 @@ pipeline {
             }
         }
 
-        // ✅ TEST PIPELINE LOGS
+        // ✅ TEST LOGGING
         stage('Check Logs Pipeline') {
             steps {
                 sh '''
@@ -218,6 +221,7 @@ pipeline {
     }
 
     post {
+
         success {
             echo "✅ PIPELINE SUCCESS 🚀"
         }
@@ -227,7 +231,6 @@ pipeline {
 
             sh '''
                 kubectl get pods -A || true
-
                 kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=100 || true
                 kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=100 || true
                 kubectl logs -l app=fluent-bit -n ${LOGGING_NS} --tail=100 || true
