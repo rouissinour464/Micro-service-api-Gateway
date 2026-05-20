@@ -139,7 +139,7 @@ pipeline {
             }
         }
 
-        // ✅ DEPLOY LOGGING SAFE
+        // ✅ DEPLOY LOGGING SAFE (NO DELETE PVC)
         stage('Deploy Logging') {
             steps {
                 timeout(time: 3, unit: 'MINUTES') {
@@ -149,16 +149,13 @@ pipeline {
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        kubectl delete pvc pvc-opensearch-dashboards -n ${LOGGING_NS} || true
-                        kubectl delete pv pv-opensearch-dashboards || true
-
                         kubectl apply -k k8s/logging
                     '''
                 }
             }
         }
 
-        // ✅ WAIT PODS READY (IMPORTANT)
+        // ✅ WAIT UNTIL SERVICES READY
         stage('Wait Logging Ready') {
             steps {
                 sh '''
@@ -202,9 +199,11 @@ pipeline {
                 sh '''
                     set -eux
 
+                    echo "=== GENERATE TEST LOG ==="
                     kubectl run log-test --image=busybox --restart=Never -- echo "test log pipeline" || true
                     sleep 5
 
+                    echo "=== CHECK OPENSEARCH ==="
                     kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 > /dev/null 2>&1 &
                     sleep 5
 
@@ -215,6 +214,7 @@ pipeline {
     }
 
     post {
+
         success {
             echo "✅ PIPELINE SUCCESS 🚀"
         }
@@ -223,10 +223,16 @@ pipeline {
             echo "❌ PIPELINE FAILED"
 
             sh '''
+                echo "=== DEBUG PODS ==="
                 kubectl get pods -A || true
 
+                echo "=== OPENSEARCH LOGS ==="
                 kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=100 || true
+
+                echo "=== DASHBOARDS LOGS ==="
                 kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=100 || true
+
+                echo "=== FLUENT BIT LOGS ==="
                 kubectl logs -l app=fluent-bit -n ${LOGGING_NS} --tail=100 || true
             '''
         }
