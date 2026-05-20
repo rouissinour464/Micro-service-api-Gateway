@@ -9,9 +9,6 @@ data:
     server.name: opensearch-dashboards
     server.host: "0.0.0.0"
     opensearch.hosts: ["http://opensearch.logging.svc.cluster.local:9200"]
-    opensearch_security.disabled: true
-    opensearch.ssl.verificationMode: none
-
 ---
 apiVersion: v1
 kind: Service
@@ -58,10 +55,9 @@ spec:
         - name: fix-permissions
           image: busybox:1.35
           command:
-            - chown
-            - -R
-            - 1000:1000
-            - /usr/share/opensearch-dashboards/data
+            - sh
+            - -c
+            - chown -R 1000:1000 /usr/share/opensearch-dashboards/data
           volumeMounts:
             - name: dashboards-storage
               mountPath: /usr/share/opensearch-dashboards/data
@@ -87,15 +83,14 @@ spec:
             - name: dashboards-storage
               mountPath: /usr/share/opensearch-dashboards/data
 
+            # ✅ FIX IMPORTANT : mount dossier complet config
             - name: config
-              mountPath: /usr/share/opensearch-dashboards/config/opensearch_dashboards.yml
-              subPath: opensearch_dashboards.yml
+              mountPath: /usr/share/opensearch-dashboards/config/
 
           resources:
             requests:
               memory: "256Mi"
               cpu: "100m"
-
             limits:
               memory: "512Mi"
               cpu: "250m"
@@ -104,7 +99,6 @@ spec:
             httpGet:
               path: /api/status
               port: 5601
-
             initialDelaySeconds: 90
             periodSeconds: 15
             failureThreshold: 8
@@ -113,7 +107,6 @@ spec:
             httpGet:
               path: /api/status
               port: 5601
-
             initialDelaySeconds: 120
             periodSeconds: 20
             failureThreshold: 5

@@ -1,13 +1,14 @@
 pipeline {
     agent any
 
-    triggers {
-        githubPush()
-        cron('H */10 * * *')
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
     }
 
-    options {
-        timestamps()
+    triggers {
+        githubPush()
+        cron('H */6 * * *')
     }
 
     tools {
@@ -15,17 +16,16 @@ pipeline {
     }
 
     environment {
-        REGISTRY          = "nour292"
-        IMAGE             = "${REGISTRY}/api-gateway"
-        TAG               = "${BUILD_NUMBER}"
+        REGISTRY   = "nour292"
+        IMAGE      = "${REGISTRY}/api-gateway"
+        TAG        = "${BUILD_NUMBER}"
+        KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
-        KUBECONFIG        = "/var/lib/jenkins/.kube/config"
+        NAMESPACE  = "gestion-projet"
+        LOGGING_NS = "logging"
 
         SONAR_PROJECT_KEY = "rouissinour464_micro-service-api-gateway"
         SONAR_ORG         = "rouissinour464"
-
-        LOGGING_NAMESPACE = "logging"
-        APP_NAMESPACE     = "gestion-projet"
     }
 
     stages {
@@ -36,21 +36,37 @@ pipeline {
             }
         }
 
-        stage('Build + Test + Sonar') {
+        stage('Unit Tests') {
+            steps {
+                sh '''
+                    set -eux
+                    chmod +x mvnw
+                    ./mvnw test
+                '''
+            }
+        }
+
+        stage('Integration Tests') {
+            steps {
+                sh '''
+                    set -eux
+                    ./mvnw verify
+                '''
+            }
+        }
+
+        stage('SonarCloud Analysis') {
             steps {
                 withSonarQubeEnv('SonarCloud') {
-                    withCredentials([
-                        string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')
-                    ]) {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                         sh '''
                             set -eux
-                            chmod +x mvnw
 
-                            ./mvnw clean verify sonar:sonar \
-                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                                -Dsonar.organization=${SONAR_ORG} \
-                                -Dsonar.host.url=https://sonarcloud.io \
-                                -Dsonar.token=${SONAR_TOKEN}
+                            ./mvnw sonar:sonar \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.organization=${SONAR_ORG} \
+                              -Dsonar.host.url=https://sonarcloud.io \
+                              -Dsonar.token=${SONAR_TOKEN}
                         '''
                     }
                 }
@@ -65,7 +81,16 @@ pipeline {
             }
         }
 
-        stage('Docker Build & Push') {
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    set -eux
+                    docker build -t ${IMAGE}:${TAG} .
+                '''
+            }
+        }
+
+        stage('Docker Push') {
             steps {
                 withCredentials([
                     string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')
@@ -75,10 +100,8 @@ pipeline {
 
                         echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
 
-                        docker build -t ${IMAGE}:${TAG} .
-                        docker tag ${IMAGE}:${TAG} ${IMAGE}:latest
-
                         docker push ${IMAGE}:${TAG}
+                        docker tag ${IMAGE}:${TAG} ${IMAGE}:latest
                         docker push ${IMAGE}:latest
 
                         docker logout
@@ -87,7 +110,7 @@ pipeline {
             }
         }
 
-        stage('Check Cluster Nodes') {
+        stage('Check Cluster') {
             steps {
                 sh '''
                     set -eux
@@ -96,89 +119,56 @@ pipeline {
             }
         }
 
-        stage('Deploy Logging Stack') {
+        stage('Deploy App') {
             steps {
                 sh '''
                     set -eux
-
-                    echo "📦 Create namespace logging"
-                    kubectl create namespace ${LOGGING_NAMESPACE} \
-                        --dry-run=client -o yaml | kubectl apply -f -
-
-                    echo "🚀 Apply logging stack (kustomize)"
-                    kubectl apply -k k8s/logging
-
-                    echo "⏳ Wait OpenSearch..."
-                    kubectl rollout status deployment/opensearch \
-                        -n ${LOGGING_NAMESPACE} \
-                        --timeout=600s
-
-                    echo "⏳ Wait OpenSearch Dashboards..."
-                    kubectl rollout status deployment/opensearch-dashboards \
-                        -n ${LOGGING_NAMESPACE} \
-                        --timeout=600s
-
-                    echo "⏳ Wait Fluent Bit..."
-                    kubectl rollout status daemonset/fluent-bit \
-                        -n ${LOGGING_NAMESPACE} \
-                        --timeout=180s
-
-                    echo "✅ Logging stack ready"
-
-                    kubectl get pods -n ${LOGGING_NAMESPACE}
-                '''
-            }
-        }
-
-        stage('Deploy Application') {
-            steps {
-                sh '''
-                    set -eux
-
-                    echo "📦 Create namespace app"
-                    kubectl create namespace ${APP_NAMESPACE} \
-                        --dry-run=client -o yaml | kubectl apply -f -
-
-                    echo "🚀 Deploy application"
                     kubectl apply -k k8s/app
                 '''
             }
         }
 
-        stage('Rollout Restart') {
+        stage('Restart App') {
             steps {
                 sh '''
                     set -eux
-
-                    kubectl rollout restart deployment gateway-service -n ${APP_NAMESPACE}
-                    kubectl rollout status deployment gateway-service -n ${APP_NAMESPACE} --timeout=300s
+                    kubectl rollout restart deployment gateway-service -n ${NAMESPACE}
+                    kubectl rollout status deployment gateway-service -n ${NAMESPACE}
                 '''
             }
         }
 
-        stage('Verify Logging') {
+        stage('Deploy Logging') {
             steps {
                 sh '''
                     set -eux
 
-                    echo "⏳ Wait indexing..."
-                    sleep 20
+                    kubectl create namespace ${LOGGING_NS} \
+                        --dry-run=client -o yaml | kubectl apply -f -
 
-                    OPENSEARCH_POD=$(kubectl get pod \
-                        -n ${LOGGING_NAMESPACE} \
-                        -l app=opensearch \
-                        -o jsonpath="{.items[0].metadata.name}")
+                    kubectl apply -k k8s/logging
+                '''
+            }
+        }
 
-                    echo "📊 Cluster health"
-                    kubectl exec $OPENSEARCH_POD -n ${LOGGING_NAMESPACE} -- \
-                        curl -s http://localhost:9200/_cluster/health?pretty
+        stage('Restart Logging') {
+            steps {
+                sh '''
+                    set -eux
 
-                    echo "📚 Indices"
-                    kubectl exec $OPENSEARCH_POD -n ${LOGGING_NAMESPACE} -- \
-                        curl -s http://localhost:9200/_cat/indices?v
+                    kubectl rollout restart deployment/opensearch -n ${LOGGING_NS} || true
+                    kubectl rollout restart deployment/opensearch-dashboards -n ${LOGGING_NS} || true
+                    kubectl rollout restart daemonset/fluent-bit -n ${LOGGING_NS} || true
+                '''
+            }
+        }
 
-                    echo "🌐 Dashboards URL"
-                    echo "http://<NODE_IP>:30601"
+        stage('Check Pods') {
+            steps {
+                sh '''
+                    set -eux
+                    kubectl get pods -n ${NAMESPACE}
+                    kubectl get pods -n ${LOGGING_NS}
                 '''
             }
         }
@@ -186,29 +176,18 @@ pipeline {
 
     post {
         success {
-            echo """
-✅ SUCCESS PIPELINE
-
-🌐 OpenSearch Dashboards:
-http://<NODE_IP>:30601
-"""
+            echo "✅ PIPELINE SUCCESS 🚀"
         }
 
         failure {
+            echo "❌ PIPELINE FAILED"
+
             sh '''
-                echo "❌ FAILURE LOGS"
+                kubectl get pods -n ${NAMESPACE} || true
+                kubectl get pods -n ${LOGGING_NS} || true
 
-                echo "APP PODS"
-                kubectl get pods -n ${APP_NAMESPACE} || true
-
-                echo "LOGGING PODS"
-                kubectl get pods -n ${LOGGING_NAMESPACE} || true
-
-                echo "OPENSEARCH LOGS"
-                kubectl logs -n ${LOGGING_NAMESPACE} -l app=opensearch --tail=100 || true
-
-                echo "DASHBOARDS LOGS"
-                kubectl logs -n ${LOGGING_NAMESPACE} -l app=opensearch-dashboards --tail=100 || true
+                kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=80 || true
+                kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=80 || true
             '''
         }
 
