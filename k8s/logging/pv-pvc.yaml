@@ -89,8 +89,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
-  # ← selector supprimé
+      storage: 10Gi
 
 ---
 apiVersion: v1
