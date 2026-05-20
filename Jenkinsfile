@@ -139,7 +139,7 @@ pipeline {
             }
         }
 
-        # ✅ DEPLOY LOGGING (FIX PVC + CONFIG)
+        // ✅ DEPLOY LOGGING (FIX PVC)
         stage('Deploy Logging') {
             steps {
                 sh '''
@@ -148,7 +148,7 @@ pipeline {
                     kubectl create namespace ${LOGGING_NS} \
                         --dry-run=client -o yaml | kubectl apply -f -
 
-                    # ✅ IMPORTANT : éviter erreur resize PVC
+                    # ✅ FIX erreur PVC (obligatoire)
                     kubectl delete pvc pvc-opensearch-dashboards -n ${LOGGING_NS} || true
                     kubectl delete pv pv-opensearch-dashboards || true
 
@@ -174,27 +174,29 @@ pipeline {
                 sh '''
                     set -eux
 
-                    echo "== APP PODS =="
+                    echo "=== APP PODS ==="
                     kubectl get pods -n ${NAMESPACE}
 
-                    echo "== LOGGING PODS =="
+                    echo "=== LOGGING PODS ==="
                     kubectl get pods -n ${LOGGING_NS}
                 '''
             }
         }
 
+        // ✅ TEST PIPELINE LOGS
         stage('Check Logs Pipeline') {
             steps {
                 sh '''
                     set -eux
 
-                    echo "== TEST LOG GENERATION =="
+                    echo "=== GENERATE TEST LOG ==="
                     kubectl run log-test --image=busybox --restart=Never -- echo "test log pipeline" || true
 
-                    echo "== WAIT 5s FOR FLUENT BIT =="
+                    echo "=== WAIT 5 SECONDS ==="
                     sleep 5
 
-                    echo "== CHECK OPENSEARCH INDICES =="
+                    echo "=== CHECK OPENSEARCH ==="
+
                     kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 &
                     sleep 5
 
@@ -214,17 +216,17 @@ pipeline {
             echo "❌ PIPELINE FAILED"
 
             sh '''
-                echo "== DEBUG PODS =="
+                echo "=== DEBUG PODS ==="
                 kubectl get pods -n ${NAMESPACE} || true
                 kubectl get pods -n ${LOGGING_NS} || true
 
-                echo "== OPENSEARCH LOGS =="
+                echo "=== OPENSEARCH LOGS ==="
                 kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=100 || true
 
-                echo "== DASHBOARDS LOGS =="
+                echo "=== DASHBOARDS LOGS ==="
                 kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=100 || true
 
-                echo "== FLUENT BIT LOGS =="
+                echo "=== FLUENT BIT LOGS ==="
                 kubectl logs -l app=fluent-bit -n ${LOGGING_NS} --tail=100 || true
             '''
         }
