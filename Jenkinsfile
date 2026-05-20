@@ -133,37 +133,52 @@ pipeline {
             }
         }
 
-        // ✅ DEPLOY LOGGING — FIX PV RELEASED AUTOMATIQUE
+        // ✅ DEPLOY LOGGING — TOUJOURS APPLY + FIX PVs AUTOMATIQUE
         stage('Deploy Logging') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     sh '''
                         set -eux
 
+                        # Créer namespace
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        # ✅ FIX DEFINITIF : libérer les PVs Released avant apply
+                        # ✅ FIX PVs Released ou NotFound → toujours apply pv-pvc
+                        echo "🔧 Vérification et fix des PVs..."
                         for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
                             STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                            echo "PV $PV → $STATUS"
                             if [ "$STATUS" = "Released" ]; then
-                                echo "🔧 PV $PV Released → libération"
                                 kubectl patch pv $PV --type=json \
                                     -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
+                                echo "✅ PV $PV libéré"
                             fi
                         done
 
-                        # ✅ Créer dossiers SANS chmod (permissions déjà fixées sur la VM)
-                        mkdir -p /data/opensearch-logs \
-                                 /data/opensearch-dashboards \
-                                 /data/fluentbit-db || true
+                        # ✅ Toujours appliquer PVs et PVCs (idempotent)
+                        kubectl apply -f k8s/logging/pv-pvc.yaml
 
-                        if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
-                            echo "✅ Logging déjà installé"
-                        else
-                            echo "🚀 Installation logging"
-                            kubectl apply -k k8s/logging
-                        fi
+                        # ✅ Attendre que les PVs soient Available
+                        echo "⏳ Attente PVs Available..."
+                        for i in $(seq 1 10); do
+                            ALL_OK=true
+                            for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
+                                STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                                if [ "$STATUS" != "Available" ] && [ "$STATUS" != "Bound" ]; then
+                                    ALL_OK=false
+                                fi
+                            done
+                            if [ "$ALL_OK" = "true" ]; then
+                                echo "✅ Tous les PVs sont prêts"
+                                break
+                            fi
+                            echo "Tentative $i/10 — attente 3s..."
+                            sleep 3
+                        done
+
+                        # ✅ Déployer le reste du stack logging
+                        kubectl apply -k k8s/logging
                     '''
                 }
             }
@@ -175,19 +190,13 @@ pipeline {
                 sh '''
                     set -eux
 
-                    if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
+                    echo "⏳ OpenSearch check (120s max)"
+                    kubectl rollout status deployment/opensearch \
+                        -n ${LOGGING_NS} --timeout=120s || true
 
-                        echo "⏳ OpenSearch check (120s max)"
-                        kubectl rollout status deployment/opensearch \
-                            -n ${LOGGING_NS} --timeout=120s || true
-
-                        echo "⏳ Dashboards check (120s max)"
-                        kubectl rollout status deployment/opensearch-dashboards \
-                            -n ${LOGGING_NS} --timeout=120s || true
-
-                    else
-                        echo "Logging not installed → skip"
-                    fi
+                    echo "⏳ Dashboards check (120s max)"
+                    kubectl rollout status deployment/opensearch-dashboards \
+                        -n ${LOGGING_NS} --timeout=120s || true
                 '''
             }
         }
