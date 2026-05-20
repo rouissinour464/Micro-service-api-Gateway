@@ -19,6 +19,7 @@ pipeline {
         REGISTRY   = "nour292"
         IMAGE      = "${REGISTRY}/api-gateway"
         TAG        = "${BUILD_NUMBER}"
+
         KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
         NAMESPACE  = "gestion-projet"
@@ -138,6 +139,7 @@ pipeline {
             }
         }
 
+        # ✅ DEPLOY LOGGING (FIX PVC + CONFIG)
         stage('Deploy Logging') {
             steps {
                 sh '''
@@ -145,6 +147,10 @@ pipeline {
 
                     kubectl create namespace ${LOGGING_NS} \
                         --dry-run=client -o yaml | kubectl apply -f -
+
+                    # ✅ IMPORTANT : éviter erreur resize PVC
+                    kubectl delete pvc pvc-opensearch-dashboards -n ${LOGGING_NS} || true
+                    kubectl delete pv pv-opensearch-dashboards || true
 
                     kubectl apply -k k8s/logging
                 '''
@@ -167,14 +173,39 @@ pipeline {
             steps {
                 sh '''
                     set -eux
+
+                    echo "== APP PODS =="
                     kubectl get pods -n ${NAMESPACE}
+
+                    echo "== LOGGING PODS =="
                     kubectl get pods -n ${LOGGING_NS}
+                '''
+            }
+        }
+
+        stage('Check Logs Pipeline') {
+            steps {
+                sh '''
+                    set -eux
+
+                    echo "== TEST LOG GENERATION =="
+                    kubectl run log-test --image=busybox --restart=Never -- echo "test log pipeline" || true
+
+                    echo "== WAIT 5s FOR FLUENT BIT =="
+                    sleep 5
+
+                    echo "== CHECK OPENSEARCH INDICES =="
+                    kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 &
+                    sleep 5
+
+                    curl -s localhost:9200/_cat/indices?v || true
                 '''
             }
         }
     }
 
     post {
+
         success {
             echo "✅ PIPELINE SUCCESS 🚀"
         }
@@ -183,11 +214,18 @@ pipeline {
             echo "❌ PIPELINE FAILED"
 
             sh '''
+                echo "== DEBUG PODS =="
                 kubectl get pods -n ${NAMESPACE} || true
                 kubectl get pods -n ${LOGGING_NS} || true
 
-                kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=80 || true
-                kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=80 || true
+                echo "== OPENSEARCH LOGS =="
+                kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=100 || true
+
+                echo "== DASHBOARDS LOGS =="
+                kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=100 || true
+
+                echo "== FLUENT BIT LOGS =="
+                kubectl logs -l app=fluent-bit -n ${LOGGING_NS} --tail=100 || true
             '''
         }
 
