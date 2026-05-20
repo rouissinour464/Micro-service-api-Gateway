@@ -18,10 +18,14 @@ pipeline {
         REGISTRY          = "nour292"
         IMAGE             = "${REGISTRY}/api-gateway"
         TAG               = "${BUILD_NUMBER}"
+
         KUBECONFIG        = "/var/lib/jenkins/.kube/config"
+
         SONAR_PROJECT_KEY = "rouissinour464_micro-service-api-gateway"
         SONAR_ORG         = "rouissinour464"
+
         LOGGING_NAMESPACE = "logging"
+        APP_NAMESPACE     = "gestion-projet"
     }
 
     stages {
@@ -34,11 +38,18 @@ pipeline {
 
         stage('Build + Test + Sonar') {
             steps {
+
                 withSonarQubeEnv('SonarCloud') {
-                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+
+                    withCredentials([
+                        string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')
+                    ]) {
+
                         sh '''
                             set -eux
+
                             chmod +x mvnw
+
                             ./mvnw clean verify sonar:sonar \
                                 -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                                 -Dsonar.organization=${SONAR_ORG} \
@@ -52,6 +63,7 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
+
                 timeout(time: 5, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
@@ -60,14 +72,25 @@ pipeline {
 
         stage('Docker Build & Push') {
             steps {
-                withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
+
+                withCredentials([
+                    string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')
+                ]) {
+
                     sh '''
                         set -eux
-                        echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
+
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u ${REGISTRY} \
+                            --password-stdin
+
                         docker build -t ${IMAGE}:${TAG} .
-                        docker tag  ${IMAGE}:${TAG} ${IMAGE}:latest
+
+                        docker tag ${IMAGE}:${TAG} ${IMAGE}:latest
+
                         docker push ${IMAGE}:${TAG}
                         docker push ${IMAGE}:latest
+
                         docker logout
                     '''
                 }
@@ -76,84 +99,104 @@ pipeline {
 
         stage('Check Cluster Nodes') {
             steps {
-                sh 'set -eux && kubectl get nodes'
+
+                sh '''
+                    set -eux
+                    kubectl get nodes
+                '''
             }
         }
 
         stage('Deploy Logging Stack') {
             steps {
+
                 sh '''
                     set -eux
-                    echo "📦 Nettoyage PV/PVC bloqués si nécessaire..."
 
-                    for pv in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
-                        STATUS=$(kubectl get pv $pv \
-                            -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                        if [ "$STATUS" = "Released" ]; then
-                            echo "⚠️  PV $pv Released → libération claimRef"
-                            kubectl patch pv $pv \
-                                --type=json \
-                                -p='[{"op":"remove","path":"/spec/claimRef"}]'
-                        fi
-                    done
+                    echo "📦 Création namespace logging..."
 
-                    for pvc in pvc-opensearch-logs pvc-opensearch-dashboards pvc-fluentbit-db; do
-                        STATUS=$(kubectl get pvc $pvc -n ${LOGGING_NAMESPACE} \
-                            -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                        if [ "$STATUS" = "Terminating" ]; then
-                            echo "⚠️  PVC $pvc Terminating → forçage suppression"
-                            kubectl patch pvc $pvc -n ${LOGGING_NAMESPACE} \
-                                --type=json \
-                                -p='[{"op":"remove","path":"/metadata/finalizers"}]' || true
-                        fi
-                    done
+                    kubectl create namespace ${LOGGING_NAMESPACE} \
+                        --dry-run=client -o yaml | kubectl apply -f -
 
-                    echo "📦 Déploiement de la stack logging..."
+                    echo "🚀 Déploiement stack logging..."
+
                     kubectl apply -k k8s/logging
+
+                    echo "🔄 Restart OpenSearch..."
+                    kubectl rollout restart deployment/opensearch \
+                        -n ${LOGGING_NAMESPACE} || true
+
+                    echo "🔄 Restart Dashboards..."
+                    kubectl rollout restart deployment/opensearch-dashboards \
+                        -n ${LOGGING_NAMESPACE} || true
+
+                    echo "🔄 Restart Fluent Bit..."
+                    kubectl rollout restart daemonset/fluent-bit \
+                        -n ${LOGGING_NAMESPACE} || true
 
                     echo "⏳ Attente OpenSearch..."
                     kubectl rollout status deployment/opensearch \
                         --namespace=${LOGGING_NAMESPACE} \
                         --timeout=300s
 
-                    echo "⏳ Attente OpenSearch Dashboards..."
+                    echo "⏳ Attente Dashboards..."
                     kubectl rollout status deployment/opensearch-dashboards \
                         --namespace=${LOGGING_NAMESPACE} \
-                        --timeout=180s
+                        --timeout=600s
 
                     echo "⏳ Attente Fluent Bit..."
                     kubectl rollout status daemonset/fluent-bit \
                         --namespace=${LOGGING_NAMESPACE} \
-                        --timeout=120s
+                        --timeout=180s
 
-                    echo "✅ Stack logging déployée !"
+                    echo "✅ Stack logging prête"
+
                     kubectl get pods -n ${LOGGING_NAMESPACE}
-                    kubectl get pvc  -n ${LOGGING_NAMESPACE}
                 '''
             }
         }
 
-        stage('Deploy K3s') {
+        stage('Deploy Application') {
             steps {
-                sh 'set -eux && kubectl apply -k k8s/app'
+
+                sh '''
+                    set -eux
+
+                    echo "📦 Création namespace application..."
+
+                    kubectl create namespace ${APP_NAMESPACE} \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                    echo "🚀 Déploiement application..."
+
+                    kubectl apply -k k8s/app
+                '''
             }
         }
 
         stage('Rollout Restart') {
             steps {
+
                 sh '''
                     set -eux
-                    kubectl rollout restart deployment gateway-service -n gestion-projet
-                    kubectl rollout status  deployment gateway-service -n gestion-projet --timeout=180s
+
+                    kubectl rollout restart deployment gateway-service \
+                        -n ${APP_NAMESPACE}
+
+                    kubectl rollout status deployment gateway-service \
+                        -n ${APP_NAMESPACE} \
+                        --timeout=300s
                 '''
             }
         }
 
         stage('Verify Logging') {
             steps {
+
                 sh '''
                     set -eux
-                    echo "⏳ Attente indexation Fluent Bit (20s)..."
+
+                    echo "⏳ Attente indexation Fluent Bit..."
                     sleep 20
 
                     OPENSEARCH_POD=$(kubectl get pod \
@@ -161,53 +204,118 @@ pipeline {
                         --selector=app=opensearch \
                         --output=jsonpath="{.items[0].metadata.name}")
 
-                    echo "🔍 Indices OpenSearch :"
+                    echo "📊 Santé OpenSearch"
+
                     kubectl exec ${OPENSEARCH_POD} \
                         --namespace=${LOGGING_NAMESPACE} \
-                        -- curl -s "http://localhost:9200/_cat/indices?v" || true
+                        -- curl -s \
+                        "http://localhost:9200/_cluster/health?pretty"
 
-                    echo "💚 Santé du cluster OpenSearch :"
+                    echo "📚 Indices OpenSearch"
+
                     kubectl exec ${OPENSEARCH_POD} \
                         --namespace=${LOGGING_NAMESPACE} \
-                        -- curl -s "http://localhost:9200/_cluster/health?pretty"
+                        -- curl -s \
+                        "http://localhost:9200/_cat/indices?v"
 
-                    echo "🌐 Dashboards : http://<NODE_IP>:30601"
+                    echo "🌐 OpenSearch Dashboards"
+                    echo "http://<NODE_IP>:30601"
                 '''
             }
         }
     }
 
     post {
+
         success {
-            echo "✅ API-GATEWAY PIPELINE SUCCESS 🚀 — Dashboards: http://<NODE_IP>:30601"
+
+            echo '''
+✅ PIPELINE SUCCESS 🚀
+
+🌐 OpenSearch Dashboards:
+http://<NODE_IP>:30601
+'''
         }
 
         failure {
+
             sh '''
+                echo "=============================="
+                echo "❌ PIPELINE FAILURE"
+                echo "=============================="
+
+                echo ""
                 echo "=== Namespace gestion-projet ==="
-                kubectl get pods      -n gestion-projet || true
-                kubectl describe pods -n gestion-projet || true
-                kubectl get events    -n gestion-projet || true
 
+                kubectl get pods -n ${APP_NAMESPACE} || true
+                kubectl describe pods -n ${APP_NAMESPACE} || true
+                kubectl get events -n ${APP_NAMESPACE} || true
+
+                echo ""
                 echo "=== Namespace logging ==="
-                kubectl get pods -n logging || true
-                kubectl get pvc  -n logging || true
 
-                kubectl describe deployment opensearch            -n logging || true
-                kubectl describe deployment opensearch-dashboards -n logging || true
-                kubectl describe daemonset  fluent-bit            -n logging || true
+                kubectl get pods -n ${LOGGING_NAMESPACE} || true
+                kubectl get pvc -n ${LOGGING_NAMESPACE} || true
 
+                echo ""
+                echo "=== Describe OpenSearch ==="
+
+                kubectl describe deployment opensearch \
+                    -n ${LOGGING_NAMESPACE} || true
+
+                echo ""
+                echo "=== Describe Dashboards ==="
+
+                kubectl describe deployment opensearch-dashboards \
+                    -n ${LOGGING_NAMESPACE} || true
+
+                echo ""
+                echo "=== Describe Fluent Bit ==="
+
+                kubectl describe daemonset fluent-bit \
+                    -n ${LOGGING_NAMESPACE} || true
+
+                echo ""
                 echo "=== Logs OpenSearch ==="
+
                 OPENSEARCH_POD=$(kubectl get pod \
-                    --namespace=logging \
+                    --namespace=${LOGGING_NAMESPACE} \
                     --selector=app=opensearch \
-                    --output=jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "")
+                    --output=jsonpath="{.items[0].metadata.name}" \
+                    2>/dev/null || echo "")
+
                 if [ -n "$OPENSEARCH_POD" ]; then
-                    kubectl logs ${OPENSEARCH_POD} --namespace=logging --tail=50 || true
+
+                    kubectl logs ${OPENSEARCH_POD} \
+                        --namespace=${LOGGING_NAMESPACE} \
+                        --tail=100 || true
                 fi
 
+                echo ""
+                echo "=== Logs Dashboards ==="
+
+                DASHBOARD_POD=$(kubectl get pod \
+                    --namespace=${LOGGING_NAMESPACE} \
+                    --selector=app=opensearch-dashboards \
+                    --output=jsonpath="{.items[0].metadata.name}" \
+                    2>/dev/null || echo "")
+
+                if [ -n "$DASHBOARD_POD" ]; then
+
+                    kubectl logs ${DASHBOARD_POD} \
+                        --namespace=${LOGGING_NAMESPACE} \
+                        --tail=100 || true
+
+                    kubectl describe pod ${DASHBOARD_POD} \
+                        --namespace=${LOGGING_NAMESPACE} || true
+                fi
+
+                echo ""
                 echo "=== Logs Fluent Bit ==="
-                kubectl logs daemonset/fluent-bit --namespace=logging --tail=50 || true
+
+                kubectl logs daemonset/fluent-bit \
+                    --namespace=${LOGGING_NAMESPACE} \
+                    --tail=100 || true
             '''
         }
 
