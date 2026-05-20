@@ -62,7 +62,6 @@ pipeline {
                     withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                         sh '''
                             set -eux
-
                             ./mvnw sonar:sonar \
                               -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                               -Dsonar.organization=${SONAR_ORG} \
@@ -93,18 +92,13 @@ pipeline {
 
         stage('Docker Push') {
             steps {
-                withCredentials([
-                    string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')
-                ]) {
+                withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
                     sh '''
                         set -eux
-
                         echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
-
                         docker push ${IMAGE}:${TAG}
                         docker tag ${IMAGE}:${TAG} ${IMAGE}:latest
                         docker push ${IMAGE}:latest
-
                         docker logout
                     '''
                 }
@@ -139,8 +133,8 @@ pipeline {
             }
         }
 
-        // ✅ DEPLOY LOGGING SAFE
-        stage('Deploy Logging (Safe)') {
+        // ✅ SAFE INSTALL LOGGING (1 seule fois)
+        stage('Deploy Logging') {
             steps {
                 timeout(time: 3, unit: 'MINUTES') {
                     sh '''
@@ -150,7 +144,7 @@ pipeline {
                             --dry-run=client -o yaml | kubectl apply -f -
 
                         if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
-                            echo "✅ Logging déjà installé → SKIP"
+                            echo "✅ Logging déjà installé"
                         else
                             echo "🚀 Installation logging"
                             kubectl apply -k k8s/logging
@@ -160,18 +154,20 @@ pipeline {
             }
         }
 
-        // ✅ WAIT SAFE (NE CASSE PAS LE PIPELINE)
+        // ✅ WAIT SAFE (JAMAIS FAIL)
         stage('Wait Logging Ready') {
             steps {
                 sh '''
                     set -eux
 
                     if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
-                        echo "⏳ Waiting OpenSearch..."
-                        kubectl rollout status deployment/opensearch -n ${LOGGING_NS} || true
 
-                        echo "⏳ Waiting Dashboards..."
-                        kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS} || true
+                        echo "⏳ OpenSearch check (60s max)"
+                        kubectl rollout status deployment/opensearch -n ${LOGGING_NS} --timeout=60s || true
+
+                        echo "⏳ Dashboards check (60s max)"
+                        kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS} --timeout=60s || true
+
                     else
                         echo "Logging not installed → skip"
                     fi
@@ -179,11 +175,11 @@ pipeline {
             }
         }
 
-        // ✅ RESTART DÉSACTIVÉ
+        // ✅ Restart SAFE
         stage('Restart Logging') {
             steps {
                 sh '''
-                    echo "⚠️ Restart logging disabled"
+                    echo "⚠️ Restart logging ignoré pour éviter bug PVC"
                 '''
             }
         }
@@ -192,28 +188,28 @@ pipeline {
             steps {
                 sh '''
                     set -eux
-
-                    echo "=== APP ==="
+                    echo "=== APP PODS ==="
                     kubectl get pods -n ${NAMESPACE}
 
-                    echo "=== LOGGING ==="
+                    echo "=== LOGGING PODS ==="
                     kubectl get pods -n ${LOGGING_NS}
                 '''
             }
         }
 
-        // ✅ TEST LOGGING
+        // ✅ TEST FINAL LOGS
         stage('Check Logs Pipeline') {
             steps {
                 sh '''
                     set -eux
 
-                    kubectl run log-test --image=busybox --restart=Never -- echo "test log pipeline" || true
+                    kubectl run log-test --image=busybox --restart=Never -- echo "hello logs" || true
                     sleep 5
 
                     kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 > /dev/null 2>&1 &
                     sleep 5
 
+                    echo "=== INDICES ==="
                     curl -s localhost:9200/_cat/indices?v || true
                 '''
             }
@@ -221,7 +217,6 @@ pipeline {
     }
 
     post {
-
         success {
             echo "✅ PIPELINE SUCCESS 🚀"
         }

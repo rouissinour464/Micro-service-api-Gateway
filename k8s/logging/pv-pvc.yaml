@@ -104,7 +104,7 @@ spec:
   capacity:
     storage: 1Gi
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   hostPath:
     path: /data/fluentbit-db
@@ -121,7 +121,7 @@ metadata:
 spec:
   storageClassName: logging-local
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   resources:
     requests:
       storage: 1Gi
