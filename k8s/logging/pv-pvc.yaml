@@ -4,7 +4,7 @@ kind: StorageClass
 metadata:
   name: logging-local
 provisioner: kubernetes.io/no-provisioner
-volumeBindingMode: WaitForFirstConsumer
+volumeBindingMode: Immediate        # ← Corrigé : WaitForFirstConsumer causait le deadlock
 reclaimPolicy: Retain
 
 ---
@@ -47,9 +47,8 @@ spec:
   resources:
     requests:
       storage: 20Gi
-  selector:
-    matchLabels:
-      app: opensearch
+  # ← selector supprimé : incompatible avec WaitForFirstConsumer
+  #   et inutile car le storageClassName suffit à cibler le bon PV
 
 ---
 apiVersion: v1
@@ -91,9 +90,7 @@ spec:
   resources:
     requests:
       storage: 2Gi
-  selector:
-    matchLabels:
-      app: opensearch-dashboards
+  # ← selector supprimé
 
 ---
 apiVersion: v1
@@ -129,6 +126,3 @@ spec:
   resources:
     requests:
       storage: 1Gi
-  selector:
-    matchLabels:
-      app: fluent-bit
