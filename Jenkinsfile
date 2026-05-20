@@ -24,6 +24,9 @@ pipeline {
 
         NAMESPACE  = "gestion-projet"
         LOGGING_NS = "logging"
+
+        SONAR_PROJECT_KEY = "rouissinour464_micro-service-api-gateway"
+        SONAR_ORG         = "rouissinour464"
     }
 
     stages {
@@ -34,23 +37,68 @@ pipeline {
             }
         }
 
-        stage('Build & Test') {
+        stage('Unit Tests') {
             steps {
                 sh '''
                     set -eux
                     chmod +x mvnw
-                    ./mvnw clean verify
+                    ./mvnw test
                 '''
             }
         }
 
-        stage('Docker Build & Push') {
+        stage('Integration Tests') {
             steps {
-                withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
+                sh '''
+                    set -eux
+                    ./mvnw verify
+                '''
+            }
+        }
+
+        stage('SonarCloud Analysis') {
+            steps {
+                withSonarQubeEnv('SonarCloud') {
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            set -eux
+
+                            ./mvnw sonar:sonar \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.organization=${SONAR_ORG} \
+                              -Dsonar.host.url=https://sonarcloud.io \
+                              -Dsonar.token=${SONAR_TOKEN}
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    set -eux
+                    docker build -t ${IMAGE}:${TAG} .
+                '''
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')
+                ]) {
                     sh '''
                         set -eux
 
-                        docker build -t ${IMAGE}:${TAG} .
                         echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
 
                         docker push ${IMAGE}:${TAG}
@@ -63,33 +111,76 @@ pipeline {
             }
         }
 
+        stage('Check Cluster') {
+            steps {
+                sh '''
+                    set -eux
+                    kubectl get nodes
+                '''
+            }
+        }
+
         stage('Deploy App') {
             steps {
                 sh '''
                     set -eux
-
                     kubectl apply -k k8s/app
+                '''
+            }
+        }
 
+        stage('Restart App') {
+            steps {
+                sh '''
+                    set -eux
                     kubectl rollout restart deployment gateway-service -n ${NAMESPACE}
                     kubectl rollout status deployment gateway-service -n ${NAMESPACE}
                 '''
             }
         }
 
-        // ✅ DEPLOY LOGGING UNIQUEMENT SI PAS EXISTANT
-        stage('Init Logging (one-time)') {
+        // ✅ DEPLOY LOGGING SAFE (NE SE REDEPLoie PAS)
+        stage('Deploy Logging (Safe)') {
+            steps {
+                timeout(time: 3, unit: 'MINUTES') {
+                    sh '''
+                        set -eux
+
+                        kubectl create namespace ${LOGGING_NS} \
+                            --dry-run=client -o yaml | kubectl apply -f -
+
+                        if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
+                            echo "✅ Logging déjà installé → SKIP"
+                        else
+                            echo "🚀 Installation logging (1 seule fois)"
+                            kubectl apply -k k8s/logging
+                        fi
+                    '''
+                }
+            }
+        }
+
+        // ✅ WAIT SAFE
+        stage('Wait Logging Ready') {
             steps {
                 sh '''
                     set -eux
 
-                    # Vérifie si OpenSearch existe déjà
                     if kubectl get deployment opensearch -n ${LOGGING_NS} >/dev/null 2>&1; then
-                        echo "✅ Logging déjà installé → SKIP"
+                        kubectl rollout status deployment/opensearch -n ${LOGGING_NS}
+                        kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS}
                     else
-                        echo "🚀 Installation Logging (1 seule fois)"
-                        kubectl create namespace ${LOGGING_NS} || true
-                        kubectl apply -k k8s/logging
+                        echo "Logging not installed → skip"
                     fi
+                '''
+            }
+        }
+
+        // ✅ RESTART DÉSACTIVÉ (EVITE BUG PVC)
+        stage('Restart Logging') {
+            steps {
+                sh '''
+                    echo "⚠️ Restart logging désactivé pour éviter problème PVC"
                 '''
             }
         }
@@ -97,6 +188,8 @@ pipeline {
         stage('Check Pods') {
             steps {
                 sh '''
+                    set -eux
+
                     echo "=== APP ==="
                     kubectl get pods -n ${NAMESPACE}
 
@@ -106,6 +199,7 @@ pipeline {
             }
         }
 
+        // ✅ TEST PIPELINE LOGS
         stage('Check Logs Pipeline') {
             steps {
                 sh '''
@@ -125,7 +219,7 @@ pipeline {
 
     post {
         success {
-            echo "✅ PIPELINE SUCCESS ✅"
+            echo "✅ PIPELINE SUCCESS 🚀"
         }
 
         failure {
@@ -133,8 +227,15 @@ pipeline {
 
             sh '''
                 kubectl get pods -A || true
-                kubectl logs -n ${LOGGING_NS} -l app=opensearch --tail=100 || true
+
+                kubectl logs -l app=opensearch -n ${LOGGING_NS} --tail=100 || true
+                kubectl logs -l app=opensearch-dashboards -n ${LOGGING_NS} --tail=100 || true
+                kubectl logs -l app=fluent-bit -n ${LOGGING_NS} --tail=100 || true
             '''
+        }
+
+        always {
+            cleanWs()
         }
     }
 }
