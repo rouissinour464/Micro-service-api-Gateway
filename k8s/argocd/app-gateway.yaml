@@ -7,20 +7,17 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
-
   source:
-    repoURL: https://github.com/rouissinour464/Micro-service-api-Gateway.git  # ← adapte l'URL
+    repoURL: https://github.com/rouissinour464/Micro-service-api-Gateway.git
     targetRevision: HEAD
     path: k8s/app
-
   destination:
     server: https://kubernetes.default.svc
     namespace: gestion-projet
-
   syncPolicy:
     automated:
-      prune: true        # supprime les ressources retirées du repo
-      selfHeal: true     # re-synchronise si quelqu'un modifie le cluster manuellement
+      prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true

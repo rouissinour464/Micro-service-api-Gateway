@@ -7,16 +7,13 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
-
   source:
-    repoURL: https://github.com/rouissinour464/Micro-service-front.git  # ← repo front
+    repoURL: https://github.com/rouissinour464/Micro-service-front.git
     targetRevision: HEAD
     path: k8s/app
-
   destination:
     server: https://kubernetes.default.svc
     namespace: gestion-projet
-
   syncPolicy:
     automated:
       prune: true
