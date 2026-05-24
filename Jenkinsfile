@@ -126,16 +126,16 @@ pipeline {
                         git config user.email "${GIT_USER_EMAIL}"
                         git config user.name  "${GIT_USER_NAME}"
 
-                        git checkout -B main
+                        git checkout -B v2
 
-                        sed -i "s|newTag:.*|newTag: \\"${TAG}\\"|g" k8s/app/kustomization.yaml
+                        # ✅ Mise à jour ciblée (évite casser autres images)
+                        sed -i "/name: nour292\\/api-gateway/{n;s/newTag:.*/newTag: \\"${TAG}\\"/}" k8s/app/kustomization.yaml
 
                         git add k8s/app/kustomization.yaml
-                        git commit -m "ci: update api-gateway image tag to ${TAG} [skip ci]"
+                        git commit -m "ci: update api-gateway image tag to ${TAG} [skip ci]" || true
 
-                        REMOTE=$(git remote get-url origin \
-                            | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
-                        git push "$REMOTE" HEAD:main
+                        REMOTE=$(git remote get-url origin | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
+                        git push "$REMOTE" HEAD:v2
                     '''
                 }
             }
@@ -148,6 +148,34 @@ pipeline {
                     kubectl apply -f k8s/argocd/ -n argocd
                     echo "✅ ArgoCD apps applied"
                     argocd app list --grpc-web || true
+                '''
+            }
+        }
+
+        stage('Refresh ArgoCD Cache') {
+            steps {
+                sh '''
+                    set -eux
+                    kubectl rollout restart deployment argocd-repo-server -n argocd
+                '''
+            }
+        }
+
+        stage('Force Sync ArgoCD') {
+            steps {
+                sh '''
+                    set -eux
+                    argocd app sync api-gateway --grpc-web || true
+                '''
+            }
+        }
+
+        stage('Debug Kustomize') {
+            steps {
+                sh '''
+                    set -eux
+                    echo "🔍 Debug Kustomize"
+                    kustomize build k8s/app || true
                 '''
             }
         }
@@ -174,36 +202,16 @@ pipeline {
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        echo "🔧 Vérification et fix des PVs..."
+                        echo "🔧 Fix PVs..."
                         for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
                             STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                            echo "PV $PV → $STATUS"
                             if [ "$STATUS" = "Released" ]; then
                                 kubectl patch pv $PV --type=json \
                                     -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
-                                echo "✅ PV $PV libéré"
                             fi
                         done
 
                         kubectl apply -f k8s/logging/pv-pvc.yaml
-
-                        echo "⏳ Attente PVs Available..."
-                        for i in $(seq 1 10); do
-                            ALL_OK=true
-                            for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
-                                STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                                if [ "$STATUS" != "Available" ] && [ "$STATUS" != "Bound" ]; then
-                                    ALL_OK=false
-                                fi
-                            done
-                            if [ "$ALL_OK" = "true" ]; then
-                                echo "✅ Tous les PVs sont prêts"
-                                break
-                            fi
-                            echo "Tentative $i/10 — attente 3s..."
-                            sleep 3
-                        done
-
                         kubectl apply -k k8s/logging
                     '''
                 }
@@ -214,13 +222,8 @@ pipeline {
             steps {
                 sh '''
                     set -eux
-                    echo "⏳ OpenSearch check (120s max)"
-                    kubectl rollout status deployment/opensearch \
-                        -n ${LOGGING_NS} --timeout=120s || true
-
-                    echo "⏳ Dashboards check (120s max)"
-                    kubectl rollout status deployment/opensearch-dashboards \
-                        -n ${LOGGING_NS} --timeout=120s || true
+                    kubectl rollout status deployment/opensearch -n ${LOGGING_NS} --timeout=120s || true
+                    kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS} --timeout=120s || true
                 '''
             }
         }
@@ -229,16 +232,9 @@ pipeline {
             steps {
                 sh '''
                     set -eux
-                    echo "=== APP PODS ==="
                     kubectl get pods -n ${NAMESPACE}
-
-                    echo "=== LOGGING PODS ==="
                     kubectl get pods -n ${LOGGING_NS}
-
-                    echo "=== PVCs ==="
                     kubectl get pvc -n ${LOGGING_NS}
-
-                    echo "=== PVs ==="
                     kubectl get pv | grep logging-local || true
                 '''
             }
@@ -248,15 +244,12 @@ pipeline {
             steps {
                 sh '''
                     set -eux
-                    kubectl run log-test --image=busybox --restart=Never \
-                        -- echo "hello logs" || true
+                    kubectl run log-test --image=busybox --restart=Never -- echo "hello logs" || true
                     sleep 5
 
-                    kubectl port-forward -n ${LOGGING_NS} svc/opensearch \
-                        9200:9200 > /dev/null 2>&1 &
+                    kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 > /dev/null 2>&1 &
                     sleep 5
 
-                    echo "=== INDICES ==="
                     curl -s localhost:9200/_cat/indices?v || true
 
                     kubectl delete pod log-test --ignore-not-found=true
@@ -274,8 +267,6 @@ pipeline {
             echo "❌ PIPELINE FAILED"
             sh '''
                 kubectl get pods -A || true
-                kubectl get pvc -n logging || true
-                kubectl get pv | grep logging-local || true
                 kubectl logs -l app=opensearch -n logging --tail=100 || true
                 kubectl logs -l app=opensearch-dashboards -n logging --tail=100 || true
                 kubectl logs -l app=fluent-bit -n logging --tail=100 || true
