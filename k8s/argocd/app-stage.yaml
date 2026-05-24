@@ -9,7 +9,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/rouissinour464/-Micro-service-stage.git
-    targetRevision: HEAD
+    targetRevision: v1
     path: k8s/app
   destination:
     server: https://kubernetes.default.svc
@@ -21,9 +21,21 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      - RespectIgnoreDifferences=true
     retry:
       limit: 3
       backoff:
         duration: 5s
         factor: 2
         maxDuration: 1m
+  ignoreDifferences:
+    - group: ""
+      kind: PersistentVolumeClaim
+      name: uploads-pvc
+      jsonPointers:
+        - /spec/storageClassName
+    - group: ""
+      kind: PersistentVolume
+      name: uploads-pv
+      jsonPointers:
+        - /spec/storageClassName

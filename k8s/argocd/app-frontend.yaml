@@ -9,7 +9,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/rouissinour464/Micro-service-front.git
-    targetRevision: HEAD
+    targetRevision: v2
     path: k8s/app
   destination:
     server: https://kubernetes.default.svc
