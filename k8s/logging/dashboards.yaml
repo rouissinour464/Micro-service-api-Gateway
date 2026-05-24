@@ -1,4 +1,7 @@
 ---
+# ============================================================
+# CONFIG MAP — OpenSearch Dashboards
+# ============================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,7 +12,13 @@ data:
     server.name: opensearch-dashboards
     server.host: "0.0.0.0"
     opensearch.hosts: ["http://opensearch.logging.svc.cluster.local:9200"]
+    # Sécurité désactivée — cohérent avec OpenSearch
+    opensearch_security.disabled: true
+
 ---
+# ============================================================
+# SERVICE — Dashboards (NodePort pour accès externe)
+# ============================================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -28,6 +37,9 @@ spec:
   type: NodePort
 
 ---
+# ============================================================
+# DEPLOYMENT — OpenSearch Dashboards
+# ============================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,7 +47,6 @@ metadata:
   namespace: logging
   labels:
     app: opensearch-dashboards
-
 spec:
   replicas: 1
   progressDeadlineSeconds: 600
@@ -50,7 +61,6 @@ spec:
         app: opensearch-dashboards
 
     spec:
-
       initContainers:
         - name: fix-permissions
           image: busybox:1.35
@@ -76,14 +86,14 @@ spec:
             - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
               value: "true"
 
+            # Limite mémoire Node.js cohérente avec les limits du container
             - name: NODE_OPTIONS
               value: "--max-old-space-size=512"
 
           volumeMounts:
             - name: dashboards-storage
               mountPath: /usr/share/opensearch-dashboards/data
-
-            # ✅ FIX IMPORTANT : mount dossier complet config
+            # Mount le dossier config complet (pas juste le fichier)
             - name: config
               mountPath: /usr/share/opensearch-dashboards/config/
 

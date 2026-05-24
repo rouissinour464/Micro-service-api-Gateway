@@ -1,18 +1,27 @@
 ---
+# ============================================================
+# STORAGE CLASS
+# ============================================================
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: logging-local
 provisioner: kubernetes.io/no-provisioner
-volumeBindingMode: Immediate        # ← Corrigé : WaitForFirstConsumer causait le deadlock
+# Immediate : évite le deadlock WaitForFirstConsumer avec hostPath
+volumeBindingMode: Immediate
 reclaimPolicy: Retain
 
 ---
+# ============================================================
+# PV — OpenSearch Logs (20Gi)
+# ============================================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: pv-opensearch-logs
   labels:
+    # Label explicite pour le selector du PVC → binding déterministe
+    volume-for: opensearch-logs
     app: opensearch
     type: logging
 spec:
@@ -25,14 +34,19 @@ spec:
   hostPath:
     path: /data/opensearch-logs
     type: DirectoryOrCreate
+  # Affinité sur le nœud worker principal
+  # Remplace <WORKER_NODE_NAME> par le nom réel : kubectl get nodes
   nodeAffinity:
     required:
       nodeSelectorTerms:
         - matchExpressions:
             - key: kubernetes.io/hostname
-              operator: Exists
+              operator: Exists   # ← à remplacer par In + valeur en prod
 
 ---
+# ============================================================
+# PVC — OpenSearch Logs
+# ============================================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -47,15 +61,21 @@ spec:
   resources:
     requests:
       storage: 20Gi
-  # ← selector supprimé : incompatible avec WaitForFirstConsumer
-  #   et inutile car le storageClassName suffit à cibler le bon PV
+  # Selector explicite → garantit le binding sur le bon PV
+  selector:
+    matchLabels:
+      volume-for: opensearch-logs
 
 ---
+# ============================================================
+# PV — OpenSearch Dashboards (2Gi)
+# ============================================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: pv-opensearch-dashboards
   labels:
+    volume-for: opensearch-dashboards
     app: opensearch-dashboards
     type: logging
 spec:
@@ -76,6 +96,9 @@ spec:
               operator: Exists
 
 ---
+# ============================================================
+# PVC — OpenSearch Dashboards
+# ============================================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -90,13 +113,20 @@ spec:
   resources:
     requests:
       storage: 2Gi
+  selector:
+    matchLabels:
+      volume-for: opensearch-dashboards
 
 ---
+# ============================================================
+# PV — Fluent Bit DB (1Gi)
+# ============================================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: pv-fluentbit-db
   labels:
+    volume-for: fluentbit-db
     app: fluent-bit
     type: logging
 spec:
@@ -109,8 +139,18 @@ spec:
   hostPath:
     path: /data/fluentbit-db
     type: DirectoryOrCreate
+  # ← Corrigé : nodeAffinity manquante dans la version originale
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
 
 ---
+# ============================================================
+# PVC — Fluent Bit DB
+# ============================================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -125,3 +165,6 @@ spec:
   resources:
     requests:
       storage: 1Gi
+  selector:
+    matchLabels:
+      volume-for: fluentbit-db

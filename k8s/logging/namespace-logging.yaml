@@ -1,4 +1,7 @@
 ---
+# ============================================================
+# NAMESPACE
+# ============================================================
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -7,12 +10,35 @@ metadata:
     name: logging
 
 ---
+# ============================================================
+# SECRET — NE PAS METTRE LES VALEURS ICI EN CLAIR
+# Les credentials sont injectés par le pipeline Jenkins via :
+#   kubectl create secret generic opensearch-credentials \
+#     --from-literal=username="$OPENSEARCH_USER" \
+#     --from-literal=password="$OPENSEARCH_PASS" \
+#     --namespace=logging \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# Ajoute dans Jenkins :
+#   - Credential ID : opensearch-user  (Secret text)
+#   - Credential ID : opensearch-pass  (Secret text)
+# ============================================================
+# Ce fichier est un placeholder idempotent pour kustomize.
+# Le secret réel est créé/mis à jour par le pipeline AVANT
+# le kubectl apply -k k8s/logging
 apiVersion: v1
 kind: Secret
 metadata:
   name: opensearch-credentials
   namespace: logging
+  annotations:
+    # Signal : ce secret est géré par le pipeline, pas par kustomize
+    managed-by: "jenkins-pipeline"
 type: Opaque
-stringData:
-  username: admin
-  password: Admin@Logs2024
+# PAS de stringData ici → les valeurs viennent du pipeline
+# Si tu utilises Sealed Secrets ou Vault, remplace ce bloc
+data:
+  # Valeurs base64 vides — seront écrasées par le pipeline
+  # echo -n 'placeholder' | base64
+  username: cGxhY2Vob2xkZXI=
+  password: cGxhY2Vob2xkZXI=

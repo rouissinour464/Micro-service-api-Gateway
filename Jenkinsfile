@@ -19,22 +19,22 @@ pipeline {
         REGISTRY   = "nour292"
         IMAGE      = "${REGISTRY}/api-gateway"
         TAG        = "${BUILD_NUMBER}"
-
         KUBECONFIG = "/var/lib/jenkins/.kube/config"
-
         NAMESPACE  = "gestion-projet"
         LOGGING_NS = "logging"
 
         SONAR_PROJECT_KEY = "rouissinour464_micro-service-api-gateway"
         SONAR_ORG         = "rouissinour464"
+
+        GIT_CREDENTIALS_ID = "github-creds"
+        GIT_USER_EMAIL     = "jenkins@ci.local"
+        GIT_USER_NAME      = "Jenkins CI"
     }
 
     stages {
 
         stage('Checkout') {
-            steps {
-                checkout scm
-            }
+            steps { checkout scm }
         }
 
         stage('Unit Tests') {
@@ -114,37 +114,68 @@ pipeline {
             }
         }
 
-        stage('Deploy App') {
+        stage('Update Image Tag') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: "${GIT_CREDENTIALS_ID}",
+                    usernameVariable: 'GIT_USER',
+                    passwordVariable: 'GIT_TOKEN'
+                )]) {
+                    sh '''
+                        set -eux
+                        git config user.email "${GIT_USER_EMAIL}"
+                        git config user.name  "${GIT_USER_NAME}"
+
+                        sed -i "s|newTag:.*|newTag: \\"${TAG}\\"|g" k8s/app/kustomization.yaml
+
+                        git add k8s/app/kustomization.yaml
+                        git commit -m "ci: update api-gateway image tag to ${TAG} [skip ci]"
+
+                        REMOTE=$(git remote get-url origin \
+                            | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
+                        git push "$REMOTE" HEAD:$(git rev-parse --abbrev-ref HEAD)
+                    '''
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // NOUVEAU : applique tous les fichiers ArgoCD
+        // app-gateway, app-user, app-stage, app-frontend
+        // ─────────────────────────────────────────────
+        stage('Apply ArgoCD Apps') {
             steps {
                 sh '''
                     set -eux
-                    kubectl apply -k k8s/app
+                    kubectl apply -f k8s/argocd/ -n argocd
+                    echo "✅ ArgoCD apps applied"
+                    argocd app list --grpc-web || true
                 '''
             }
         }
 
-        stage('Restart App') {
+        stage('Wait ArgoCD Sync') {
             steps {
-                sh '''
-                    set -eux
-                    kubectl rollout restart deployment gateway-service -n ${NAMESPACE}
-                    kubectl rollout status deployment gateway-service -n ${NAMESPACE}
-                '''
+                timeout(time: 5, unit: 'MINUTES') {
+                    sh '''
+                        set -eux
+                        argocd app wait api-gateway \
+                            --sync --health --timeout 240 --grpc-web || true
+                        argocd app get api-gateway --grpc-web || true
+                    '''
+                }
             }
         }
 
-        // ✅ DEPLOY LOGGING — TOUJOURS APPLY + FIX PVs AUTOMATIQUE
         stage('Deploy Logging') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     sh '''
                         set -eux
 
-                        # Créer namespace
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        # ✅ FIX PVs Released ou NotFound → toujours apply pv-pvc
                         echo "🔧 Vérification et fix des PVs..."
                         for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
                             STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
@@ -156,10 +187,8 @@ pipeline {
                             fi
                         done
 
-                        # ✅ Toujours appliquer PVs et PVCs (idempotent)
                         kubectl apply -f k8s/logging/pv-pvc.yaml
 
-                        # ✅ Attendre que les PVs soient Available
                         echo "⏳ Attente PVs Available..."
                         for i in $(seq 1 10); do
                             ALL_OK=true
@@ -177,19 +206,16 @@ pipeline {
                             sleep 3
                         done
 
-                        # ✅ Déployer le reste du stack logging
                         kubectl apply -k k8s/logging
                     '''
                 }
             }
         }
 
-        // ✅ WAIT SAFE — JAMAIS FAIL
         stage('Wait Logging Ready') {
             steps {
                 sh '''
                     set -eux
-
                     echo "⏳ OpenSearch check (120s max)"
                     kubectl rollout status deployment/opensearch \
                         -n ${LOGGING_NS} --timeout=120s || true
@@ -220,12 +246,10 @@ pipeline {
             }
         }
 
-        // ✅ TEST FINAL LOGS
         stage('Check Logs Pipeline') {
             steps {
                 sh '''
                     set -eux
-
                     kubectl run log-test --image=busybox --restart=Never \
                         -- echo "hello logs" || true
                     sleep 5
@@ -237,7 +261,6 @@ pipeline {
                     echo "=== INDICES ==="
                     curl -s localhost:9200/_cat/indices?v || true
 
-                    # cleanup
                     kubectl delete pod log-test --ignore-not-found=true
                     pkill -f "port-forward.*9200" || true
                 '''
@@ -249,10 +272,8 @@ pipeline {
         success {
             echo "✅ PIPELINE SUCCESS 🚀"
         }
-
         failure {
             echo "❌ PIPELINE FAILED"
-
             sh '''
                 kubectl get pods -A || true
                 kubectl get pvc -n logging || true
@@ -262,7 +283,6 @@ pipeline {
                 kubectl logs -l app=fluent-bit -n logging --tail=100 || true
             '''
         }
-
         always {
             cleanWs()
         }

@@ -7,3 +7,8 @@ resources:
   - configmap.yml
   - gateway-deployment.yml
   - gateway-service.yml
+
+# ← uniquement ceci est ajouté
+images:
+  - name: nour292/api-gateway
+    newTag: "latest"

@@ -1,4 +1,7 @@
 ---
+# ============================================================
+# CONFIG MAP — OpenSearch
+# ============================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,6 +16,7 @@ data:
 
     bootstrap.memory_lock: false
 
+    # Sécurité désactivée en dev — activer en prod avec TLS + auth
     plugins.security.disabled: true
 
     node.max_local_storage_nodes: 1
@@ -20,6 +24,9 @@ data:
     indices.fielddata.cache.size: 20%
 
 ---
+# ============================================================
+# SERVICE — OpenSearch (ClusterIP interne)
+# ============================================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -35,7 +42,11 @@ spec:
       port: 9200
       targetPort: 9200
   type: ClusterIP
+
 ---
+# ============================================================
+# DEPLOYMENT — OpenSearch
+# ============================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -54,12 +65,14 @@ spec:
         app: opensearch
     spec:
       initContainers:
+        # Requis par OpenSearch/Elasticsearch : vm.max_map_count minimum 262144
         - name: fix-vm-map
           image: busybox:1.35
           command: ["sysctl", "-w", "vm.max_map_count=262144"]
           securityContext:
             privileged: true
 
+        # Fix permissions sur le volume data
         - name: fix-permissions
           image: busybox:1.35
           command: ["chown", "-R", "1000:1000", "/usr/share/opensearch/data"]
@@ -73,36 +86,37 @@ spec:
           ports:
             - containerPort: 9200
               name: http
+
           env:
+            # ← Corrigé : mémoire cohérente avec les limits (1.5Gi)
             - name: OPENSEARCH_JAVA_OPTS
               value: "-Xms512m -Xmx512m"
+
+            # Sécurité désactivée — cohérent avec opensearch.yml
+            # ← Corrigé : suppression des credentials inutiles quand
+            #   la sécurité est désactivée (ils étaient ignorés)
             - name: DISABLE_SECURITY_PLUGIN
               value: "true"
+
             - name: discovery.type
               value: single-node
-            - name: OPENSEARCH_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: opensearch-credentials
-                  key: username
-            - name: OPENSEARCH_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: opensearch-credentials
-                  key: password
+
           volumeMounts:
             - name: data
               mountPath: /usr/share/opensearch/data
             - name: config
               mountPath: /usr/share/opensearch/config/opensearch.yml
               subPath: opensearch.yml
+
           resources:
             requests:
               memory: "768Mi"
               cpu: "250m"
             limits:
-              memory: "1228Mi"
+              # ← Corrigé : 1.5Gi au lieu de 1228Mi (plus propre, plus de marge)
+              memory: "1536Mi"
               cpu: "500m"
+
           readinessProbe:
             httpGet:
               path: /_cluster/health
@@ -110,12 +124,14 @@ spec:
             initialDelaySeconds: 45
             periodSeconds: 10
             failureThreshold: 6
+
           livenessProbe:
             httpGet:
               path: /_cluster/health
               port: 9200
             initialDelaySeconds: 90
             periodSeconds: 20
+            failureThreshold: 5
 
       volumes:
         - name: data
