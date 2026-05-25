@@ -146,7 +146,6 @@ pipeline {
 
                         git checkout -B v2
 
-                        # Mise à jour ciblée — évite de casser les autres images
                         sed -i "/name: nour292\\/api-gateway/{n;s/newTag:.*/newTag: \\"${TAG}\\"/}" \
                             k8s/app/kustomization.yaml
 
@@ -235,39 +234,8 @@ pipeline {
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        # ── 2. Libérer les PVs (Released OU Bound sans PVC) ──────
-                        echo "🔧 Libération des PVs..."
-                        for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
-                            STATUS=$(kubectl get pv $PV \
-                                -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                            echo "  PV $PV : $STATUS"
-                            if [ "$STATUS" = "Released" ] || [ "$STATUS" = "Bound" ]; then
-                                kubectl patch pv $PV --type=json \
-                                    -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
-                            fi
-                        done
-
-                        # ── 3. Supprimer les PVCs existants ──────────────────────
-                        # Nécessaire car le champ spec.selector est IMMUTABLE après
-                        # création : on ne peut pas patcher un PVC Bound pour lui
-                        # ajouter/modifier un selector.
-                        # Les données sont préservées : les PVs ont reclaimPolicy=Retain.
-                        echo "🗑️  Suppression des PVCs existants..."
-                        for PVC in pvc-opensearch-logs pvc-opensearch-dashboards pvc-fluentbit-db; do
-                            kubectl delete pvc $PVC \
-                                -n ${LOGGING_NS} --ignore-not-found=true
-                        done
-
-                        # ── 4. Attendre la suppression complète ──────────────────
-                        echo "⏳ Attente suppression PVCs..."
-                        for PVC in pvc-opensearch-logs pvc-opensearch-dashboards pvc-fluentbit-db; do
-                            kubectl wait --for=delete pvc/$PVC \
-                                -n ${LOGGING_NS} --timeout=60s || true
-                        done
-
-                        # ── 5. Re-libérer les PVs après suppression des PVCs ─────
-                        # (le status repasse Released quand le PVC est supprimé)
-                        echo "🔄 Re-libération des PVs après suppression PVCs..."
+                        # ── 2. Libérer uniquement les PVs Released ───────────────
+                        echo "🔧 Vérification des PVs..."
                         for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
                             STATUS=$(kubectl get pv $PV \
                                 -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
@@ -278,11 +246,65 @@ pipeline {
                             fi
                         done
 
-                        # ── 6. Appliquer PVs + PVCs ──────────────────────────────
+                        # ── 3. Recréation INTELLIGENTE des PVCs ──────────────────
+                        # Principe : on ne supprime un PVC QUE s'il lui manque
+                        # le selector (= premiere creation ou migration depuis
+                        # un YAML sans selector).
+                        # Si le selector est déjà bon → PVC conservé intact
+                        # → les dashboards OpenSearch sont préservés.
+                        echo "🔍 Vérification des selectors PVC..."
+
+                        check_and_fix_pvc() {
+                            PVC_NAME=$1
+                            LABEL_VAL=$2
+                            NS=${LOGGING_NS}
+
+                            EXISTS=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
+                                --ignore-not-found \
+                                -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
+
+                            if [ -z "$EXISTS" ]; then
+                                echo "  ✅ $PVC_NAME : absent → sera créé par apply"
+                                return
+                            fi
+
+                            CURRENT=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
+                                -o jsonpath='{.spec.selector.matchLabels.volume-for}' \
+                                2>/dev/null || echo "")
+
+                            if [ "$CURRENT" = "$LABEL_VAL" ]; then
+                                echo "  ✅ $PVC_NAME : selector OK (volume-for=$LABEL_VAL) → conservé"
+                            else
+                                echo "  ⚠️  $PVC_NAME : selector absent/incorrect"
+                                echo "     actuel='$CURRENT'  attendu='$LABEL_VAL'"
+                                echo "     → suppression + recréation (données PV conservées)"
+
+                                kubectl delete pvc "$PVC_NAME" -n "$NS" \
+                                    --ignore-not-found=true
+                                kubectl wait --for=delete "pvc/$PVC_NAME" \
+                                    -n "$NS" --timeout=60s || true
+
+                                # Re-libérer le PV après disparition du PVC
+                                PV_NAME="pv-$(echo $PVC_NAME | sed 's/^pvc-//')"
+                                PV_ST=$(kubectl get pv "$PV_NAME" \
+                                    -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                                echo "     PV $PV_NAME après delete PVC : $PV_ST"
+                                if [ "$PV_ST" = "Released" ]; then
+                                    kubectl patch pv "$PV_NAME" --type=json \
+                                        -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
+                                fi
+                            fi
+                        }
+
+                        check_and_fix_pvc "pvc-opensearch-logs"       "opensearch-logs"
+                        check_and_fix_pvc "pvc-opensearch-dashboards"  "opensearch-dashboards"
+                        check_and_fix_pvc "pvc-fluentbit-db"           "fluentbit-db"
+
+                        # ── 4. Appliquer PVs + PVCs ──────────────────────────────
                         echo "📦 Application pv-pvc.yaml..."
                         kubectl apply -f k8s/logging/pv-pvc.yaml
 
-                        # ── 7. Appliquer tout le stack logging ───────────────────
+                        # ── 5. Appliquer tout le stack logging ───────────────────
                         echo "🚀 Application kustomize logging..."
                         kubectl apply -k k8s/logging
                     '''
