@@ -11,4 +11,4 @@ resources:
 # ← uniquement ceci est ajouté
 images:
   - name: nour292/api-gateway
-    newTag: "875"
+    newTag: "876"
