@@ -247,11 +247,12 @@ pipeline {
                         done
 
                         # ── 3. Recréation INTELLIGENTE des PVCs ──────────────────
-                        # Principe : on ne supprime un PVC QUE s'il lui manque
-                        # le selector (= premiere creation ou migration depuis
-                        # un YAML sans selector).
-                        # Si le selector est déjà bon → PVC conservé intact
-                        # → les dashboards OpenSearch sont préservés.
+                        # On ne supprime un PVC QUE si son selector volume-for
+                        # est absent ou incorrect.
+                        # FIX : jsonpath ne supporte pas les clés avec tiret → on
+                        # lit le JSON complet via python3 (disponible sur Jenkins).
+                        # Si le selector est déjà correct → PVC conservé intact
+                        # → les dashboards OpenSearch sont préservés entre les runs.
                         echo "🔍 Vérification des selectors PVC..."
 
                         check_and_fix_pvc() {
@@ -259,6 +260,7 @@ pipeline {
                             LABEL_VAL=$2
                             NS=${LOGGING_NS}
 
+                            # Vérifier existence du PVC
                             EXISTS=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
                                 --ignore-not-found \
                                 -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
@@ -268,27 +270,35 @@ pipeline {
                                 return
                             fi
 
+                            # Lire le selector via JSON + python3
+                            # (jsonpath échoue silencieusement sur les clés avec tiret)
                             CURRENT=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
-                                -o jsonpath='{.spec.selector.matchLabels.volume-for}' \
-                                2>/dev/null || echo "")
+                                -o json 2>/dev/null \
+                                | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+labels = data.get('spec', {}).get('selector', {}).get('matchLabels', {})
+print(labels.get('volume-for', ''))
+" 2>/dev/null || echo "")
+
+                            echo "  📋 $PVC_NAME : selector actuel='$CURRENT' attendu='$LABEL_VAL'"
 
                             if [ "$CURRENT" = "$LABEL_VAL" ]; then
-                                echo "  ✅ $PVC_NAME : selector OK (volume-for=$LABEL_VAL) → conservé"
+                                echo "  ✅ $PVC_NAME : selector OK → conservé (dashboards préservés)"
                             else
-                                echo "  ⚠️  $PVC_NAME : selector absent/incorrect"
-                                echo "     actuel='$CURRENT'  attendu='$LABEL_VAL'"
-                                echo "     → suppression + recréation (données PV conservées)"
+                                echo "  ⚠️  $PVC_NAME : selector absent/incorrect → recréation"
+                                echo "     (données PV conservées : reclaimPolicy=Retain)"
 
                                 kubectl delete pvc "$PVC_NAME" -n "$NS" \
                                     --ignore-not-found=true
                                 kubectl wait --for=delete "pvc/$PVC_NAME" \
                                     -n "$NS" --timeout=60s || true
 
-                                # Re-libérer le PV après disparition du PVC
+                                # Re-libérer le PV après suppression du PVC
                                 PV_NAME="pv-$(echo $PVC_NAME | sed 's/^pvc-//')"
                                 PV_ST=$(kubectl get pv "$PV_NAME" \
                                     -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                                echo "     PV $PV_NAME après delete PVC : $PV_ST"
+                                echo "     PV $PV_NAME status après delete PVC : $PV_ST"
                                 if [ "$PV_ST" = "Released" ]; then
                                     kubectl patch pv "$PV_NAME" --type=json \
                                         -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
