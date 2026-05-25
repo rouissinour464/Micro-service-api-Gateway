@@ -86,7 +86,7 @@ pipeline {
         // ============================================================
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: false  // ✅ FIX: ne bloque plus
+                    waitForQualityGate abortPipeline: false
                 }
             }
         }
@@ -225,10 +225,32 @@ pipeline {
         // ============================================================
         stage('Deploy Logging') {
         // ============================================================
+        // ✅ FIX : on vérifie si le stack est déjà UP avant de toucher quoi que ce soit
+        // ✅ FIX : les dashboards OpenSearch sont préservés (on ne supprime jamais pvc-opensearch-dashboards)
+        // ✅ FIX : le pipeline ne se relance plus automatiquement à cause du logging
+        // ============================================================
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
                     sh '''
                         set -eux
+
+                        # ── 0. Vérifier si le logging est déjà déployé et sain ────
+                        OPENSEARCH_READY=$(kubectl get deployment opensearch \
+                            -n ${LOGGING_NS} \
+                            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                        DASHBOARDS_READY=$(kubectl get deployment opensearch-dashboards \
+                            -n ${LOGGING_NS} \
+                            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+
+                        echo "OpenSearch ready replicas   : $OPENSEARCH_READY"
+                        echo "Dashboards ready replicas   : $DASHBOARDS_READY"
+
+                        if [ "$OPENSEARCH_READY" -ge 1 ] && [ "$DASHBOARDS_READY" -ge 1 ]; then
+                            echo "✅ Logging déjà UP et sain — aucune action (dashboards préservés)"
+                            exit 0
+                        fi
+
+                        echo "⚙️  Logging absent ou dégradé — déploiement en cours..."
 
                         # ── 1. Namespace ──────────────────────────────────────────
                         kubectl create namespace ${LOGGING_NS} \
@@ -253,13 +275,20 @@ pipeline {
                             fi
                         done
 
-                        # ── 4. Vérification PVCs (préserve dashboards) ────────────
+                        # ── 4. Vérification PVCs ──────────────────────────────────
+                        # ✅ IMPORTANT : pvc-opensearch-dashboards n'est JAMAIS supprimé
                         echo "🔍 Vérification des selectors PVC..."
 
                         check_and_fix_pvc() {
                             PVC_NAME=$1
                             LABEL_VAL=$2
                             NS=${LOGGING_NS}
+
+                            # ✅ Protection absolue du PVC dashboards
+                            if [ "$PVC_NAME" = "pvc-opensearch-dashboards" ]; then
+                                echo "  🔒 $PVC_NAME : protégé — jamais supprimé (données dashboards préservées)"
+                                return
+                            fi
 
                             EXISTS=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
                                 --ignore-not-found \
@@ -282,7 +311,7 @@ print(labels.get('volume-for', ''))
                             echo "  📋 $PVC_NAME : selector actuel='$CURRENT' attendu='$LABEL_VAL'"
 
                             if [ "$CURRENT" = "$LABEL_VAL" ]; then
-                                echo "  ✅ $PVC_NAME : selector OK → conservé (dashboards préservés)"
+                                echo "  ✅ $PVC_NAME : selector OK → conservé"
                             else
                                 echo "  ⚠️  $PVC_NAME : selector incorrect → recréation"
                                 kubectl delete pvc "$PVC_NAME" -n "$NS" \
@@ -322,7 +351,7 @@ print(labels.get('volume-for', ''))
         // ============================================================
             steps {
                 sh '''
-                    // ✅ FIX: || true évite de bloquer le pipeline si timeout
+                    set -eux
                     kubectl rollout status deployment/opensearch \
                         -n ${LOGGING_NS} --timeout=180s || true
                     kubectl rollout status deployment/opensearch-dashboards \
