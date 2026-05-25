@@ -33,11 +33,15 @@ pipeline {
 
     stages {
 
+        // ============================================================
         stage('Checkout') {
+        // ============================================================
             steps { checkout scm }
         }
 
+        // ============================================================
         stage('Unit Tests') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -47,7 +51,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Integration Tests') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -56,7 +62,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('SonarCloud Analysis') {
+        // ============================================================
             steps {
                 withSonarQubeEnv('SonarCloud') {
                     withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
@@ -73,7 +81,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Quality Gate') {
+        // ============================================================
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
@@ -81,7 +91,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Docker Build') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -90,14 +102,16 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Docker Push') {
+        // ============================================================
             steps {
                 withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
                     sh '''
                         set -eux
                         echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
                         docker push ${IMAGE}:${TAG}
-                        docker tag ${IMAGE}:${TAG} ${IMAGE}:latest
+                        docker tag  ${IMAGE}:${TAG} ${IMAGE}:latest
                         docker push ${IMAGE}:latest
                         docker logout
                     '''
@@ -105,7 +119,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Check Cluster') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -114,7 +130,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Update Image Tag') {
+        // ============================================================
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: "${GIT_CREDENTIALS_ID}",
@@ -128,20 +146,24 @@ pipeline {
 
                         git checkout -B v2
 
-                        # ✅ Mise à jour ciblée (évite casser autres images)
-                        sed -i "/name: nour292\\/api-gateway/{n;s/newTag:.*/newTag: \\"${TAG}\\"/}" k8s/app/kustomization.yaml
+                        # Mise à jour ciblée — évite de casser les autres images
+                        sed -i "/name: nour292\\/api-gateway/{n;s/newTag:.*/newTag: \\"${TAG}\\"/}" \
+                            k8s/app/kustomization.yaml
 
                         git add k8s/app/kustomization.yaml
                         git commit -m "ci: update api-gateway image tag to ${TAG} [skip ci]" || true
 
-                        REMOTE=$(git remote get-url origin | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
+                        REMOTE=$(git remote get-url origin \
+                            | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
                         git push "$REMOTE" HEAD:v2
                     '''
                 }
             }
         }
 
+        // ============================================================
         stage('Apply ArgoCD Apps') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -152,7 +174,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Refresh ArgoCD Cache') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -161,7 +185,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Force Sync ArgoCD') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -170,7 +196,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Debug Kustomize') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -180,7 +208,9 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Wait ArgoCD Sync') {
+        // ============================================================
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     sh '''
@@ -193,61 +223,115 @@ pipeline {
             }
         }
 
+        // ============================================================
         stage('Deploy Logging') {
+        // ============================================================
             steps {
-                timeout(time: 5, unit: 'MINUTES') {
+                timeout(time: 10, unit: 'MINUTES') {
                     sh '''
                         set -eux
 
+                        # ── 1. Namespace ──────────────────────────────────────────
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        echo "🔧 Fix PVs..."
+                        # ── 2. Libérer les PVs (Released OU Bound sans PVC) ──────
+                        echo "🔧 Libération des PVs..."
                         for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
-                            STATUS=$(kubectl get pv $PV -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                            STATUS=$(kubectl get pv $PV \
+                                -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                            echo "  PV $PV : $STATUS"
+                            if [ "$STATUS" = "Released" ] || [ "$STATUS" = "Bound" ]; then
+                                kubectl patch pv $PV --type=json \
+                                    -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
+                            fi
+                        done
+
+                        # ── 3. Supprimer les PVCs existants ──────────────────────
+                        # Nécessaire car le champ spec.selector est IMMUTABLE après
+                        # création : on ne peut pas patcher un PVC Bound pour lui
+                        # ajouter/modifier un selector.
+                        # Les données sont préservées : les PVs ont reclaimPolicy=Retain.
+                        echo "🗑️  Suppression des PVCs existants..."
+                        for PVC in pvc-opensearch-logs pvc-opensearch-dashboards pvc-fluentbit-db; do
+                            kubectl delete pvc $PVC \
+                                -n ${LOGGING_NS} --ignore-not-found=true
+                        done
+
+                        # ── 4. Attendre la suppression complète ──────────────────
+                        echo "⏳ Attente suppression PVCs..."
+                        for PVC in pvc-opensearch-logs pvc-opensearch-dashboards pvc-fluentbit-db; do
+                            kubectl wait --for=delete pvc/$PVC \
+                                -n ${LOGGING_NS} --timeout=60s || true
+                        done
+
+                        # ── 5. Re-libérer les PVs après suppression des PVCs ─────
+                        # (le status repasse Released quand le PVC est supprimé)
+                        echo "🔄 Re-libération des PVs après suppression PVCs..."
+                        for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
+                            STATUS=$(kubectl get pv $PV \
+                                -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+                            echo "  PV $PV : $STATUS"
                             if [ "$STATUS" = "Released" ]; then
                                 kubectl patch pv $PV --type=json \
                                     -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
                             fi
                         done
 
+                        # ── 6. Appliquer PVs + PVCs ──────────────────────────────
+                        echo "📦 Application pv-pvc.yaml..."
                         kubectl apply -f k8s/logging/pv-pvc.yaml
+
+                        # ── 7. Appliquer tout le stack logging ───────────────────
+                        echo "🚀 Application kustomize logging..."
                         kubectl apply -k k8s/logging
                     '''
                 }
             }
         }
 
+        // ============================================================
         stage('Wait Logging Ready') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
-                    kubectl rollout status deployment/opensearch -n ${LOGGING_NS} --timeout=120s || true
-                    kubectl rollout status deployment/opensearch-dashboards -n ${LOGGING_NS} --timeout=120s || true
+                    kubectl rollout status deployment/opensearch \
+                        -n ${LOGGING_NS} --timeout=180s || true
+                    kubectl rollout status deployment/opensearch-dashboards \
+                        -n ${LOGGING_NS} --timeout=180s || true
                 '''
             }
         }
 
+        // ============================================================
         stage('Check Pods') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
                     kubectl get pods -n ${NAMESPACE}
                     kubectl get pods -n ${LOGGING_NS}
-                    kubectl get pvc -n ${LOGGING_NS}
+                    kubectl get pvc  -n ${LOGGING_NS}
                     kubectl get pv | grep logging-local || true
                 '''
             }
         }
 
+        // ============================================================
         stage('Check Logs Pipeline') {
+        // ============================================================
             steps {
                 sh '''
                     set -eux
-                    kubectl run log-test --image=busybox --restart=Never -- echo "hello logs" || true
+                    kubectl run log-test \
+                        --image=busybox --restart=Never \
+                        -- echo "hello logs" || true
                     sleep 5
 
-                    kubectl port-forward -n ${LOGGING_NS} svc/opensearch 9200:9200 > /dev/null 2>&1 &
+                    kubectl port-forward \
+                        -n ${LOGGING_NS} svc/opensearch 9200:9200 \
+                        > /dev/null 2>&1 &
                     sleep 5
 
                     curl -s localhost:9200/_cat/indices?v || true
@@ -257,7 +341,8 @@ pipeline {
                 '''
             }
         }
-    }
+
+    } // end stages
 
     post {
         success {
@@ -267,9 +352,12 @@ pipeline {
             echo "❌ PIPELINE FAILED"
             sh '''
                 kubectl get pods -A || true
-                kubectl logs -l app=opensearch -n logging --tail=100 || true
-                kubectl logs -l app=opensearch-dashboards -n logging --tail=100 || true
-                kubectl logs -l app=fluent-bit -n logging --tail=100 || true
+                kubectl logs -l app=opensearch \
+                    -n logging --tail=100 || true
+                kubectl logs -l app=opensearch-dashboards \
+                    -n logging --tail=100 || true
+                kubectl logs -l app=fluent-bit \
+                    -n logging --tail=100 || true
             '''
         }
         always {
