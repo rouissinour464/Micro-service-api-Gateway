@@ -1,26 +1,18 @@
 ---
-# ============================================================
-# STORAGE CLASS
-# ============================================================
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: logging-local
 provisioner: kubernetes.io/no-provisioner
-# Immediate : évite le deadlock WaitForFirstConsumer avec hostPath
 volumeBindingMode: Immediate
 reclaimPolicy: Retain
 
 ---
-# ============================================================
-# PV — OpenSearch Logs (20Gi)
-# ============================================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: pv-opensearch-logs
   labels:
-    # Label explicite pour le selector du PVC → binding déterministe
     volume-for: opensearch-logs
     app: opensearch
     type: logging
@@ -34,19 +26,14 @@ spec:
   hostPath:
     path: /data/opensearch-logs
     type: DirectoryOrCreate
-  # Affinité sur le nœud worker principal
-  # Remplace <WORKER_NODE_NAME> par le nom réel : kubectl get nodes
   nodeAffinity:
     required:
       nodeSelectorTerms:
         - matchExpressions:
             - key: kubernetes.io/hostname
-              operator: Exists   # ← à remplacer par In + valeur en prod
+              operator: Exists
 
 ---
-# ============================================================
-# PVC — OpenSearch Logs
-# ============================================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -61,15 +48,11 @@ spec:
   resources:
     requests:
       storage: 20Gi
-  # Selector explicite → garantit le binding sur le bon PV
   selector:
     matchLabels:
       volume-for: opensearch-logs
 
 ---
-# ============================================================
-# PV — OpenSearch Dashboards (2Gi)
-# ============================================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -96,9 +79,6 @@ spec:
               operator: Exists
 
 ---
-# ============================================================
-# PVC — OpenSearch Dashboards
-# ============================================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -118,9 +98,6 @@ spec:
       volume-for: opensearch-dashboards
 
 ---
-# ============================================================
-# PV — Fluent Bit DB (1Gi)
-# ============================================================
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -139,7 +116,6 @@ spec:
   hostPath:
     path: /data/fluentbit-db
     type: DirectoryOrCreate
-  # ← Corrigé : nodeAffinity manquante dans la version originale
   nodeAffinity:
     required:
       nodeSelectorTerms:
@@ -148,9 +124,6 @@ spec:
               operator: Exists
 
 ---
-# ============================================================
-# PVC — Fluent Bit DB
-# ============================================================
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

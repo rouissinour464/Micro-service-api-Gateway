@@ -1,7 +1,4 @@
 ---
-# ============================================================
-# CONFIG MAP — OpenSearch Dashboards
-# ============================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,13 +9,9 @@ data:
     server.name: opensearch-dashboards
     server.host: "0.0.0.0"
     opensearch.hosts: ["http://opensearch.logging.svc.cluster.local:9200"]
-    # Sécurité désactivée — cohérent avec OpenSearch
     opensearch_security.disabled: true
 
 ---
-# ============================================================
-# SERVICE — Dashboards (NodePort pour accès externe)
-# ============================================================
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,9 +30,6 @@ spec:
   type: NodePort
 
 ---
-# ============================================================
-# DEPLOYMENT — OpenSearch Dashboards
-# ============================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,16 +40,13 @@ metadata:
 spec:
   replicas: 1
   progressDeadlineSeconds: 600
-
   selector:
     matchLabels:
       app: opensearch-dashboards
-
   template:
     metadata:
       labels:
         app: opensearch-dashboards
-
     spec:
       initContainers:
         - name: fix-permissions
@@ -75,28 +62,20 @@ spec:
       containers:
         - name: dashboards
           image: opensearchproject/opensearch-dashboards:2.13.0
-
           ports:
             - containerPort: 5601
-
           env:
             - name: OPENSEARCH_HOSTS
               value: '["http://opensearch.logging.svc.cluster.local:9200"]'
-
             - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
               value: "true"
-
-            # Limite mémoire Node.js cohérente avec les limits du container
             - name: NODE_OPTIONS
               value: "--max-old-space-size=512"
-
           volumeMounts:
             - name: dashboards-storage
               mountPath: /usr/share/opensearch-dashboards/data
-            # Mount le dossier config complet (pas juste le fichier)
             - name: config
               mountPath: /usr/share/opensearch-dashboards/config/
-
           resources:
             requests:
               memory: "256Mi"
@@ -104,7 +83,6 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "250m"
-
           readinessProbe:
             httpGet:
               path: /api/status
@@ -112,20 +90,5 @@ spec:
             initialDelaySeconds: 90
             periodSeconds: 15
             failureThreshold: 8
-
           livenessProbe:
             httpGet:
-              path: /api/status
-              port: 5601
-            initialDelaySeconds: 120
-            periodSeconds: 20
-            failureThreshold: 5
-
-      volumes:
-        - name: dashboards-storage
-          persistentVolumeClaim:
-            claimName: pvc-opensearch-dashboards
-
-        - name: config
-          configMap:
-            name: dashboards-config
