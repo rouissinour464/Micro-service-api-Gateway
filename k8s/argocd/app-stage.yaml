@@ -1,3 +1,4 @@
+# k8s/app/argocd-application.yaml — VERSION FINALE
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -21,21 +22,12 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
-      - RespectIgnoreDifferences=true
+      # RespectIgnoreDifferences supprimé : plus nécessaire
     retry:
       limit: 3
       backoff:
         duration: 5s
         factor: 2
         maxDuration: 1m
-  ignoreDifferences:
-    - group: ""
-      kind: PersistentVolumeClaim
-      name: uploads-pvc
-      jsonPointers:
-        - /spec/storageClassName
-    - group: ""
-      kind: PersistentVolume
-      name: uploads-pv
-      jsonPointers:
-        - /spec/storageClassName
+  # ignoreDifferences entièrement supprimé :
+  # plus de PV manuel → plus de conflit storageClassName
