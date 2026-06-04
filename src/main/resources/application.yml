@@ -1,15 +1,29 @@
-# =========================
-# SERVER
-# =========================
-server:
-  port: 8080
+# =============================================================
+# CONFIGURATION API GATEWAY — Spring Cloud Gateway
+# =============================================================
+# Ce service est le point d'entrée unique de tous les appels backend.
+# Il reçoit les requêtes de Nginx et les distribue aux microservices
+# selon l'URL demandée (routage par prédicat de chemin).
+# =============================================================
+
 
 # =========================
-# SPRING CONFIG
+# SERVEUR
+# =========================
+server:
+  # Port d'écoute de l'API Gateway dans le réseau Docker interne
+  # Nginx proxifie vers ce port via "proxy_pass http://api-gateway:8080"
+  port: 8080
+
+
+# =========================
+# SPRING CONFIGURATION
 # =========================
 spring:
 
   application:
+    # Nom du service — utilisé dans les logs, les métriques Prometheus
+    # et l'interface Spring Boot Admin (si configuré)
     name: api-gateway
 
   cloud:
@@ -17,29 +31,60 @@ spring:
     gateway:
 
       routes:
+        # Chaque route est une règle de routage :
+        #   id         → identifiant unique (pour les logs et le debug)
+        #   uri        → destination (microservice cible)
+        #   predicates → condition de déclenchement (ici : URL correspondante)
+        #   filters    → transformations appliquées à la requête/réponse
+        #
+        # ORDRE IMPORTANT : Spring Cloud Gateway évalue les routes
+        # dans l'ordre de déclaration. La première règle qui match gagne.
+
 
         # =========================
-        # AUTH SERVICE - AUTH
+        # AUTH SERVICE — /api/auth/**
+        # Endpoints d'authentification : login, logout, refresh token,
+        # inscription, confirmation d'email, reset de mot de passe…
         # =========================
         - id: auth-service-auth
+          # URI construite depuis des variables d'environnement Docker
+          # Syntaxe ${VAR:valeur_par_defaut} : utilise la variable d'env
+          # si elle est définie, sinon utilise "localhost:8081"
+          # En production Docker : AUTH_SERVICE_HOST=auth-service, PORT=8081
           uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
           predicates:
+            # Matche toute URL commençant par /api/auth/
+            # ex: /api/auth/login, /api/auth/register, /api/auth/refresh
             - Path=/api/auth/**
           filters:
+            # StripPrefix=0 → NE PAS supprimer de préfixe du chemin
+            # Le backend reçoit l'URL complète : /api/auth/login
+            # (StripPrefix=1 aurait envoyé : /login — à éviter ici
+            # car le service Auth attend le préfixe /api/)
             - StripPrefix=0
 
+
         # =========================
-        # AUTH SERVICE - ADMIN
+        # AUTH SERVICE — /api/admin/**
+        # Endpoints d'administration : gestion des rôles, utilisateurs,
+        # configuration système… Protégés par des droits ROLE_ADMIN
         # =========================
         - id: auth-service-admin
+          # Même service que auth-service-auth (même host:port)
+          # Route séparée pour pouvoir appliquer des filtres distincts
+          # (rate limiting, logging spécifique, middleware d'autorisation…)
           uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
           predicates:
             - Path=/api/admin/**
           filters:
             - StripPrefix=0
 
+
         # =========================
-        # AUTH SERVICE - USERS
+        # AUTH SERVICE — /api/users/**
+        # Endpoints de gestion du profil utilisateur :
+        # lecture/mise à jour du profil, changement de mot de passe,
+        # préférences, avatar…
         # =========================
         - id: auth-service-users
           uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
@@ -48,18 +93,38 @@ spring:
           filters:
             - StripPrefix=0
 
+
         # =========================
-        # STAGE SERVICE API
+        # STAGE SERVICE — Endpoints métier
+        # Une seule règle couvre tous les préfixes du service Stage.
+        # Avantage : si on ajoute un nouveau préfixe (ex: /api/evaluations/**),
+        # une seule ligne à ajouter ici.
+        # Chemins couverts :
+        #   /api/offres/**       → offres de stage (création, liste, détail)
+        #   /api/demandes/**     → candidatures des étudiants
+        #   /api/livrables/**    → documents remis pendant le stage
+        #   /api/commentaires/** → feedback des encadrants
+        #   /api/soutenances/**  → planification des soutenances
+        #   /api/encadrants/**   → gestion des encadrants
         # =========================
         - id: stage-service
           uri: http://${STAGE_SERVICE_HOST:localhost}:${STAGE_SERVICE_PORT:8082}
           predicates:
+            # Syntaxe multi-chemin : liste séparée par des virgules
             - Path=/api/offres/**,/api/demandes/**,/api/livrables/**,/api/commentaires/**,/api/soutenances/**,/api/encadrants/**
           filters:
             - StripPrefix=0
 
+
         # =========================
-        # FILE STORAGE API
+        # FILE STORAGE — /api/files/**
+        # Route dédiée aux fichiers uploadés/téléchargés.
+        # Pointe vers le MÊME service que stage-service (:8082),
+        # mais est séparée pour permettre une configuration différente :
+        #   - timeout plus long (gros fichiers)
+        #   - rate limiting différent (quota d'upload)
+        #   - circuit breaker indépendant
+        #   - redirection vers un service de stockage dédié (S3, MinIO) plus tard
         # =========================
         - id: stage-files
           uri: http://${STAGE_SERVICE_HOST:localhost}:${STAGE_SERVICE_PORT:8082}
@@ -68,33 +133,81 @@ spring:
           filters:
             - StripPrefix=0
 
+
 # =========================
 # ACTUATOR & PROMETHEUS
 # =========================
+# Spring Boot Actuator expose des endpoints de supervision HTTP
 management:
   endpoints:
     web:
       exposure:
         include: health,info,prometheus
+        # health    → GET /actuator/health  : état du service (UP/DOWN)
+        #             utilisé par Docker/Kubernetes pour les health checks
+        # info      → GET /actuator/info    : version, git commit, description
+        # prometheus → GET /actuator/prometheus : métriques au format Prometheus
+        #              scrapé par Prometheus Server toutes les N secondes
+        # (on n'expose PAS : env, beans, mappings — trop sensibles en prod)
+
   endpoint:
     health:
+      # Affiche les détails de chaque composant vérifié :
+      # base de données, services dépendants, espace disque…
+      # Utile pour le debug mais attention en prod (infos sensibles)
       show-details: always
+
   metrics:
     tags:
+      # Ce tag est ajouté à TOUTES les métriques Prometheus générées
+      # par ce service. Permet de filtrer dans Grafana :
+      # ex: http_requests_total{application="api-gateway"}
+      # Sans ce tag, impossible de distinguer les métriques de
+      # l'API Gateway de celles du service Auth ou Stage
       application: api-gateway
 
+
 # =========================
-# LOGGING — JSON pour Fluent Bit → OpenSearch
+# LOGGING — JSON structuré pour Fluent Bit → OpenSearch
 # =========================
 logging:
   level:
+    # Niveau de log global : INFO (info, warn, error) — pas de debug
     root: INFO
+
+    # Logs du routage Spring Cloud Gateway
+    # INFO permet de voir quel chemin est routé vers quel service
     org.springframework.cloud.gateway: INFO
+
+    # Logs Spring Security (authentification, autorisation)
+    # INFO pour tracer les tentatives d'accès
     org.springframework.security: INFO
-    reactor.netty.http.client: WARN       # Évite le bruit des requêtes HTTP internes
+
+    # Netty HTTP client = le client HTTP réactif utilisé par Spring WebFlux
+    # pour transmettre les requêtes aux microservices.
+    # WARN car en INFO il logue CHAQUE requête proxy en détail → très verbeux
+    # et ça noie les vraies erreurs dans les dashboards
+    reactor.netty.http.client: WARN
+
+    # Netty HTTP server = le serveur qui reçoit les requêtes de Nginx
+    # INFO : on garde une trace des requêtes entrantes au niveau serveur
     reactor.netty.http.server: INFO
 
-  # Format JSON structuré — parsé directement par Fluent Bit
   pattern:
+    # Format de sortie console : UNE ligne JSON par événement de log
+    # Parsé directement par Fluent Bit sans configuration supplémentaire
+    #
+    # Champs :
+    #   timestamp  → ISO 8601 UTC (yyyy-MM-dd'T'HH:mm:ss.SSS'Z')
+    #   level      → INFO / WARN / ERROR / DEBUG
+    #   service    → "api-gateway" (fixe) pour filtrer dans OpenSearch
+    #   thread     → nom du thread (ex: reactor-http-nio-3)
+    #   logger     → classe Java qui émet le log (tronquée à 40 chars)
+    #   message    → message du log (les guillemets internes sont échappés
+    #                par %replace pour ne pas casser le JSON)
+    #   trace      → traceId de distributed tracing (vide si non configuré)
+    #   span       → spanId de distributed tracing (vide si non configuré)
+    #
+    # Le |- YAML permet un bloc multiligne sans newline final parasite
     console: |
       {"timestamp":"%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z',UTC}","level":"%level","service":"api-gateway","thread":"%thread","logger":"%logger{40}","message":"%replace(%msg){'\"','\\\"'}","trace":"%X{traceId:-}","span":"%X{spanId:-}"}%n

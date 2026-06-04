@@ -8,7 +8,7 @@ resources:
   - gateway-deployment.yml
   - gateway-service.yml
 
-# ← uniquement ceci est ajouté
+# ← ajouter ceci
 images:
   - name: nour292/api-gateway
-    newTag: "21"
+    newTag: "latest"

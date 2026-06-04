@@ -1,21 +1,57 @@
----
+# =============================================================
+# FLUENT BIT — COLLECTEUR DE LOGS KUBERNETES
+# =============================================================
+# Fluent Bit est un agent léger qui tourne sur CHAQUE nœud du cluster
+# (DaemonSet). Il lit les logs de tous les conteneurs, les enrichit
+# avec les métadonnées Kubernetes, et les envoie vers OpenSearch.
+#
+# Flux : fichiers /var/log/containers/*.log
+#           → [INPUT tail]
+#           → [FILTER kubernetes] (enrichissement)
+#           → [OUTPUT opensearch] (stockage)
+# =============================================================
+
+
+# =============================================================
+# 1. SERVICEACCOUNT
+# Identité Kubernetes utilisée par le Pod Fluent Bit pour
+# s'authentifier auprès de l'API Server (lire les métadonnées)
+# =============================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: fluent-bit
-  namespace: logging
+  namespace: logging      # namespace dédié à toute la stack de logs
+
 
 ---
+# =============================================================
+# 2. CLUSTERROLE
+# Définit ce que Fluent Bit a le DROIT de faire dans le cluster.
+# ClusterRole = s'applique à TOUS les namespaces (contrairement à Role)
+# =============================================================
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: fluent-bit
 rules:
-  - apiGroups: [""]
-    resources: [pods, namespaces, nodes]
-    verbs: [get, list, watch]
+  - apiGroups: [""]           # "" = core API group (pas d'extension)
+    resources:
+      - pods          # lire les métadonnées des pods (labels, annotations)
+      - namespaces    # lire les infos de namespace (nom, labels)
+      - nodes         # lire les infos des nœuds (hostname, région, zone)
+    verbs:
+      - get           # lire un objet précis par son nom
+      - list          # lister tous les objets du type
+      - watch         # écouter les changements en temps réel
+
 
 ---
+# =============================================================
+# 3. CLUSTERROLEBINDING
+# Associe le ClusterRole "fluent-bit" au ServiceAccount "fluent-bit"
+# Sans ça, le ServiceAccount n'a aucun droit malgré le ClusterRole
+# =============================================================
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -23,85 +59,236 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: fluent-bit
+  name: fluent-bit           # référence le ClusterRole défini ci-dessus
 subjects:
   - kind: ServiceAccount
     name: fluent-bit
-    namespace: logging
+    namespace: logging       # le ServiceAccount est dans le namespace "logging"
+
 
 ---
+# =============================================================
+# 4. CONFIGMAP — Configuration Fluent Bit
+# Contient deux fichiers montés dans le conteneur :
+#   - fluent-bit.conf : pipeline complet (INPUT → FILTER → OUTPUT)
+#   - parsers.conf    : parsers JSON/CRI pour décoder les formats de log
+# =============================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: fluent-bit-config
   namespace: logging
 data:
+
   fluent-bit.conf: |
+
+    # -----------------------------------------------------------
+    # [SERVICE] — Configuration globale du daemon Fluent Bit
+    # -----------------------------------------------------------
     [SERVICE]
+        # Fréquence d'envoi des données vers l'OUTPUT, en secondes
+        # 5s = bon équilibre entre fraîcheur et charge réseau
         Flush             5
+
+        # Daemon Off = ne pas se mettre en arrière-plan
+        # Obligatoire dans Docker/Kubernetes (le process doit rester en foreground)
         Daemon            Off
+
+        # Niveau de verbosité des logs internes de Fluent Bit lui-même
+        # info = logs normaux (démarrage, connexions, erreurs)
         Log_Level         info
+
+        # Fichier contenant les parsers (défini plus bas dans ce ConfigMap)
         Parsers_File      parsers.conf
+
+        # HTTP_Server Off = pas d'API HTTP de monitoring de Fluent Bit
+        # (on pourrait activer pour exposer des métriques Prometheus)
         HTTP_Server       Off
+
+        # Chemin du stockage tampon sur disque (filesystem buffering)
+        # Si le réseau vers OpenSearch est coupé, les logs sont sauvegardés ici
+        # Ce chemin est dans le PVC monté pour survivre aux redémarrages
         storage.path      /var/fluentbit-db/storage
+
+        # Mode de sync disque : normal = délègue à l'OS (moins de syscalls)
+        # "full" serait plus sûr mais plus lent
         storage.sync      normal
+
+        # Pas de checksum MD5 sur les chunks (économie CPU)
         storage.checksum  off
+
+        # Nombre max de chunks "prêts à envoyer" en mémoire en même temps
+        # Limite la consommation RAM en cas de burst de logs
         storage.max_chunks_up 128
 
+
+    # -----------------------------------------------------------
+    # [INPUT] — Lecture des fichiers de logs des conteneurs
+    # -----------------------------------------------------------
     [INPUT]
+        # Plugin "tail" : lit des fichiers comme `tail -f`
         Name              tail
+
+        # Tag appliqué à tous les événements de cet INPUT
+        # "kube.*" sera utilisé par les FILTER/OUTPUT pour matcher
         Tag               kube.*
+
+        # Chemin des fichiers à lire — Kubernetes écrit les logs
+        # des conteneurs ici, un fichier par conteneur
+        # Format du nom : <pod>_<namespace>_<container>-<id>.log
         Path              /var/log/containers/*.log
+
+        # Parser à utiliser pour décoder chaque ligne du fichier
+        # "docker" = format JSON avec champs time/stream/log (voir parsers.conf)
         Parser            docker
+
+        # Base de données SQLite qui mémorise la position de lecture
+        # dans chaque fichier. Permet de reprendre sans relire depuis le début
+        # après un redémarrage du pod Fluent Bit
         DB                /var/fluentbit-db/flb.db
+
+        # Limite la mémoire utilisée pour le buffer de lecture
+        # Si dépassé, Fluent Bit arrête de lire jusqu'à libération
         Mem_Buf_Limit     20MB
+
+        # Si une ligne est plus longue que le buffer, l'ignorer
+        # plutôt que de crasher (ex: stack traces énormes)
         Skip_Long_Lines   On
+
+        # Fréquence de vérification des nouveaux fichiers et rotations, en secondes
         Refresh_Interval  5
+
+        # Exclure les logs des pods du namespace "logging" lui-même
+        # (évite la boucle : Fluent Bit qui se logue lui-même)
         Exclude_Path      /var/log/containers/*logging*.log
 
+
+    # -----------------------------------------------------------
+    # [FILTER] — Enrichissement avec les métadonnées Kubernetes
+    # -----------------------------------------------------------
     [FILTER]
+        # Plugin kubernetes : interroge l'API Server pour récupérer
+        # les métadonnées du pod qui a produit chaque log
         Name                kubernetes
+
+        # Appliqué à tous les événements tagués "kube.*" (ceux de l'INPUT ci-dessus)
         Match               kube.*
+
+        # URL de l'API Server Kubernetes interne au cluster
         Kube_URL            https://kubernetes.default.svc:443
+
+        # Certificat CA pour valider le TLS de l'API Server
+        # Injecté automatiquement par Kubernetes dans chaque pod
         Kube_CA_File        /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+        # Token JWT du ServiceAccount pour s'authentifier auprès de l'API Server
+        # Correspond aux droits définis dans le ClusterRole ci-dessus
         Kube_Token_File     /var/run/secrets/kubernetes.io/serviceaccount/token
+
+        # Si le log est lui-même du JSON (ex: nos logs Spring Boot/Nginx),
+        # le parser et le fusionner dans l'événement Fluent Bit
+        # au lieu de le laisser comme simple string dans le champ "log"
         Merge_Log           On
+
+        # Clé sous laquelle le JSON parsé sera placé dans l'événement
+        # ex: event.log_processed.level, event.log_processed.message
         Merge_Log_Key       log_processed
+
+        # Supprimer le champ "log" brut original après fusion
+        # (évite la duplication : on garde seulement log_processed)
         Keep_Log            Off
+
+        # Ajouter les labels Kubernetes du pod (app, version, etc.)
         Labels              On
+
+        # Ne pas ajouter les annotations (souvent volumineuses et inutiles pour les logs)
         Annotations         Off
 
+
+    # -----------------------------------------------------------
+    # [OUTPUT] — Envoi vers OpenSearch
+    # -----------------------------------------------------------
     [OUTPUT]
+        # Plugin opensearch (compatible avec l'API Elasticsearch)
         Name                opensearch
+
+        # Matcher tous les événements (peu importe leur tag)
         Match               *
+
+        # Hostname du service OpenSearch dans le cluster Kubernetes
+        # Format : <service>.<namespace>.svc.cluster.local
         Host                opensearch.logging.svc.cluster.local
         Port                9200
+
+        # Nom de l'index de base (si Logstash_Format est Off)
         Index               k8s-logs
+
+        # Mode Logstash : crée un index par jour au lieu d'un index fixe
+        # Permet la rotation automatique et la suppression des vieux logs
         Logstash_Format     On
+
+        # Préfixe du nom d'index (Logstash_Format = On)
         Logstash_Prefix     k8s
+
+        # Format de la date dans le nom d'index
+        # Résultat : k8s-2024.01.15, k8s-2024.01.16, etc.
         Logstash_DateFormat %Y.%m.%d
+
+        # TLS désactivé (communication interne au cluster, réseau privé)
+        # À activer si OpenSearch est exposé ou si la sécurité l'exige
         tls                 Off
+
+        # Nombre de tentatives en cas d'échec avant d'abandonner un chunk
+        # Les chunks abandonnés sont sauvegardés sur disque (storage.type filesystem)
         Retry_Limit         5
+
+        # Supprime le champ "_type" dans les documents envoyés
+        # Obligatoire pour OpenSearch 2.x+ (le type est déprécié)
         Suppress_Type_Name  On
+
+        # Stocker les chunks en attente sur disque (pas seulement en RAM)
+        # Garantit qu'aucun log n'est perdu si OpenSearch est temporairement indisponible
         storage.type        filesystem
 
+
+  # -----------------------------------------------------------
+  # parsers.conf — Décodeurs de format de log
+  # -----------------------------------------------------------
   parsers.conf: |
+
+    # Parser pour les runtimes Docker (format JSON natif)
+    # Utilisé quand le container runtime est Docker
+    # Chaque ligne de /var/log/containers/*.log est un objet JSON :
+    # {"log":"...","stream":"stdout","time":"2024-01-15T10:00:00.000Z"}
     [PARSER]
         Name        docker
         Format      json
-        Time_Key    time
-        Time_Format %Y-%m-%dT%H:%M:%S.%L
-        Time_Keep   On
+        Time_Key    time                        # champ contenant le timestamp
+        Time_Format %Y-%m-%dT%H:%M:%S.%L       # format ISO8601 avec millisecondes
+        Time_Keep   On                          # conserver le champ time dans l'événement
 
+    # Parser pour les runtimes CRI-O / containerd (format texte brut)
+    # Utilisé quand le container runtime est containerd (k8s moderne)
+    # Format d'une ligne : "2024-01-15T10:00:00.000Z stdout F le message ici"
+    # Les groupes nommés (?<name>...) deviennent des champs dans l'événement
     [PARSER]
         Name        cri
         Format      regex
         Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        #            ^timestamp      ^flux de sortie             ^F=full P=partial  ^contenu du log
         Time_Key    time
-        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z     # avec timezone (le %z)
         Time_Keep   On
 
+
 ---
+# =============================================================
+# 5. DAEMONSET — Un pod Fluent Bit par nœud du cluster
+# =============================================================
+# DaemonSet garantit qu'une instance de Fluent Bit tourne sur
+# CHAQUE nœud (y compris les nœuds ajoutés ultérieurement).
+# Nécessaire car les logs sont des fichiers locaux sur chaque nœud.
+# =============================================================
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -112,57 +299,94 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: fluent-bit
+      app: fluent-bit     # doit correspondre aux labels du template ci-dessous
+
   template:
     metadata:
       labels:
         app: fluent-bit
+
     spec:
+      # Utilise le ServiceAccount défini en haut (avec les droits RBAC)
       serviceAccountName: fluent-bit
+
+      # Tolerations : autorise Fluent Bit à être schedulé sur TOUS les nœuds,
+      # y compris les nœuds avec des taints (master, infra, GPU…)
+      # operator: Exists sans key/value = tolère TOUTES les taints
       tolerations:
         - operator: Exists
+
       containers:
         - name: fluent-bit
+          # Image officielle Fluent Bit version 3.0
           image: fluent/fluent-bit:3.0
+
           env:
+            # Credentials OpenSearch injectés depuis un Secret Kubernetes
+            # (défini dans namespace.yaml — valeurs en base64)
+            # Jamais en dur dans l'image ou le ConfigMap !
             - name: OPENSEARCH_USER
               valueFrom:
                 secretKeyRef:
-                  name: opensearch-credentials
-                  key: username
+                  name: opensearch-credentials   # nom du Secret
+                  key: username                   # clé dans le Secret
             - name: OPENSEARCH_PASS
               valueFrom:
                 secretKeyRef:
                   name: opensearch-credentials
                   key: password
+
           volumeMounts:
+            # /var/log du nœud hôte — contient les logs systemd et kubelet
             - name: varlog
               mountPath: /var/log
+
+            # Répertoire Docker du nœud hôte — les fichiers de log des conteneurs
+            # sont ici et /var/log/containers/ n'en sont que des symlinks
             - name: containers
               mountPath: /var/lib/docker/containers
-              readOnly: true
+              readOnly: true    # Fluent Bit lit seulement, n'écrit jamais
+
+            # Configuration Fluent Bit (depuis le ConfigMap ci-dessus)
             - name: config
               mountPath: /fluent-bit/etc/
+
+            # Base de données de position + buffer disque (depuis le PVC)
             - name: fluentbit-db
               mountPath: /var/fluentbit-db
+
+          # Limites de ressources : Fluent Bit est conçu pour être léger
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "50m"
+              memory: "64Mi"    # mémoire garantie au démarrage
+              cpu: "50m"        # 50 millicores = 5% d'un cœur
             limits:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: "128Mi"   # jamais plus de 128 Mo (tué si dépassé)
+              cpu: "100m"       # jamais plus de 10% d'un cœur
+
       volumes:
+        # Montage du système de fichiers du nœud hôte
+        # hostPath = chemin réel sur le nœud Kubernetes (pas dans le pod)
         - name: varlog
           hostPath:
             path: /var/log
+
         - name: containers
           hostPath:
             path: /var/lib/docker/containers
+
+        # ConfigMap monté comme répertoire de fichiers
+        # /fluent-bit/etc/fluent-bit.conf et /fluent-bit/etc/parsers.conf
         - name: config
           configMap:
             name: fluent-bit-config
+
+        # PVC pour persister la DB SQLite et le buffer disque
+        # Défini dans pv-pvc.yaml — 1 Gi sur le hostPath /data/fluentbit-db
         - name: fluentbit-db
           persistentVolumeClaim:
             claimName: pvc-fluentbit-db
+
+      # Temps accordé au pod pour terminer proprement avant d'être tué
+      # 10s : assez pour vider le buffer et fermer la DB SQLite
       terminationGracePeriodSeconds: 10

@@ -1,3 +1,6 @@
+# =============================================================
+# APPLICATION 2 : API GATEWAY (Spring Cloud Gateway)
+# =============================================================
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -9,8 +12,8 @@ spec:
   project: default
   source:
     repoURL: https://github.com/rouissinour464/Micro-service-api-Gateway.git
-    targetRevision: v2
-    path: k8s/app
+    targetRevision: v2     # tag Git stable pour la v2 du gateway
+    path: k8s/app          # contient configmap.yml, deployment, service, kustomization.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: gestion-projet
@@ -27,3 +30,5 @@ spec:
         duration: 5s
         factor: 2
         maxDuration: 1m
+ 
+ 

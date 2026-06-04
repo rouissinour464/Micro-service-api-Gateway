@@ -1,8 +1,569 @@
+# =============================================================
+# NAMESPACE & SECRET — Infrastructure de base du namespace logging
+# =============================================================
+
+
+# --- namespace.yaml ---
+
+# Namespace dédié à toute la stack de logs
+# Isolé du namespace applicatif (gestion-projet) pour :
+#   - séparer les quotas de ressources
+#   - appliquer des NetworkPolicies différentes
+#   - éviter que les logs de l'app s'auto-collectent (exclusion dans Fluent Bit)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+  labels:
+    name: logging   # label utilisé dans les NetworkPolicies et les sélecteurs
+
+
+---
+# Secret contenant les credentials OpenSearch
+# Les valeurs sont en base64 (PAS du chiffrement — juste encodage)
+# En prod, utiliser un gestionnaire de secrets (Vault, Sealed Secrets, AWS Secrets Manager)
+#
+# Pour décoder : echo "cGxhY2Vob2xkZXI=" | base64 -d → "placeholder"
+# Pour encoder : echo -n "monmotdepasse" | base64
+#
+# L'annotation managed-by indique que ce Secret est géré par Jenkins
+# (le pipeline CI/CD le crée/met à jour avec les vrais credentials)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opensearch-credentials
+  namespace: logging
+  annotations:
+    managed-by: "jenkins-pipeline"   # documentation : qui gère ce secret
+type: Opaque    # type générique pour les secrets arbitraires (vs kubernetes.io/tls, etc.)
+data:
+  username: cGxhY2Vob2xkZXI=   # base64("placeholder") — remplacé par Jenkins
+  password: cGxhY2Vob2xkZXI=   # base64("placeholder") — remplacé par Jenkins
+
+
+---
+# =============================================================
+# STOCKAGE — StorageClass, PersistentVolumes et PersistentVolumeClaims
+# =============================================================
+# Architecture du stockage :
+#   StorageClass "logging-local" (provisioner manuel)
+#     ├── PV pv-opensearch-logs      (20 Gi) → PVC pvc-opensearch-logs
+#     ├── PV pv-opensearch-dashboards (2 Gi) → PVC pvc-opensearch-dashboards
+#     └── PV pv-fluentbit-db          (1 Gi) → PVC pvc-fluentbit-db
+# =============================================================
+
+
+# StorageClass personnalisée pour le stockage local (hostPath)
+# provisioner: kubernetes.io/no-provisioner = provisionnement MANUEL
+# (l'admin doit créer les PV à la main, pas de dynamic provisioning)
+# Adapté aux clusters single-node ou bare-metal sans cloud provider
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: logging-local
+provisioner: kubernetes.io/no-provisioner
+
+# Immediate = le PVC est lié au PV dès sa création (pas d'attente de pod)
+# WaitForFirstConsumer serait mieux en multi-node pour respecter l'affinité
+volumeBindingMode: Immediate
+
+# Retain = le PV n'est PAS supprimé quand le PVC est supprimé
+# Les données survivent à la suppression du PVC → à nettoyer manuellement
+# (Delete supprimerait les données automatiquement)
+reclaimPolicy: Retain
+
+
+---
+# ---- PV OpenSearch (données des index) ----
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-opensearch-logs
+  labels:
+    volume-for: opensearch-logs      # label pour que le PVC puisse le sélectionner précisément
+    app: opensearch
+    type: logging
+spec:
+  storageClassName: logging-local    # doit correspondre à la StorageClass ci-dessus
+  capacity:
+    storage: 20Gi                    # taille totale disponible
+  accessModes:
+    - ReadWriteOnce                  # montable en lecture/écriture par UN seul nœud à la fois
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /data/opensearch-logs      # chemin réel sur le nœud Kubernetes
+    type: DirectoryOrCreate          # créer le répertoire s'il n'existe pas
+  nodeAffinity:
+    # Contrainte : ce PV ne peut être monté que par un pod schedulé
+    # sur un nœud qui a le label kubernetes.io/hostname (= tous les nœuds)
+    # En pratique ça force OpenSearch à rester sur le même nœud que son PV
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+
+---
+# PVC qui "réclame" le PV ci-dessus
+# Le selector matchLabels fait le lien précis avec le PV voulu
+# (évite de binder avec un autre PV de la même StorageClass par accident)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-opensearch-logs
+  namespace: logging
+  labels:
+    app: opensearch
+spec:
+  storageClassName: logging-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  selector:
+    matchLabels:
+      volume-for: opensearch-logs   # sélectionne précisément le PV ci-dessus
+
+
+---
+# ---- PV OpenSearch Dashboards (data Kibana-like) ----
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-opensearch-dashboards
+  labels:
+    volume-for: opensearch-dashboards
+    app: opensearch-dashboards
+    type: logging
+spec:
+  storageClassName: logging-local
+  capacity:
+    storage: 2Gi              # Dashboards nécessite peu d'espace (config, index patterns)
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /data/opensearch-dashboards
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-opensearch-dashboards
+  namespace: logging
+  labels:
+    app: opensearch-dashboards
+spec:
+  storageClassName: logging-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  selector:
+    matchLabels:
+      volume-for: opensearch-dashboards
+
+
+---
+# ---- PV Fluent Bit (DB SQLite + buffer disque) ----
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-fluentbit-db
+  labels:
+    volume-for: fluentbit-db
+    app: fluent-bit
+    type: logging
+spec:
+  storageClassName: logging-local
+  capacity:
+    storage: 1Gi    # petit : juste pour la DB de position et le buffer tampon
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /data/fluentbit-db
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-fluentbit-db
+  namespace: logging
+  labels:
+    app: fluent-bit
+spec:
+  storageClassName: logging-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  selector:
+    matchLabels:
+      volume-for: fluentbit-db
+
+
+---
+# =============================================================
+# OPENSEARCH — Moteur de recherche et stockage des logs
+# =============================================================
+# OpenSearch est un fork open-source d'Elasticsearch.
+# Il reçoit les logs de Fluent Bit et les stocke dans des index
+# datés (k8s-2024.01.15). OpenSearch Dashboards les visualise.
+# =============================================================
+
+
+# ConfigMap avec la configuration OpenSearch
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensearch-config
+  namespace: logging
+data:
+  opensearch.yml: |
+    # Nom du cluster — identifie le groupe de nœuds OpenSearch
+    # (même si on est en single-node, un nom est requis)
+    cluster.name: gestion-de-stage-logs
+
+    # Écouter sur toutes les interfaces réseau (pas seulement localhost)
+    # Obligatoire dans un conteneur pour être accessible depuis d'autres pods
+    network.host: 0.0.0.0
+
+    # Mode single-node : pas de découverte de nœuds pairs
+    # Simplifie la configuration pour un déploiement mono-instance
+    discovery.type: single-node
+
+    # Désactiver le lock mémoire (mlockall)
+    # mlockall nécessite des permissions spéciales dans K8s (SYS_RESOURCE)
+    # et n'est pas critique pour un environnement de dev/staging
+    bootstrap.memory_lock: false
+
+    # Désactiver le plugin de sécurité (auth, TLS, RBAC)
+    # ⚠️ Acceptable en dev/réseau privé K8s, JAMAIS en production exposée
+    plugins.security.disabled: true
+
+    # Autoriser plusieurs nœuds OpenSearch sur le même stockage local
+    # Utile si on multiplie les instances sur le même nœud
+    node.max_local_storage_nodes: 1
+
+    # Limite le cache des field data à 20% de la heap JVM
+    # Évite les OOM sur les agrégations Kibana/Dashboards sur de grands index
+    indices.fielddata.cache.size: 20%
+
+
+---
+# Service Kubernetes pour OpenSearch
+# ClusterIP : accessible uniquement depuis l'intérieur du cluster
+# Les autres pods l'atteignent via : http://opensearch.logging.svc.cluster.local:9200
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: logging
+  labels:
+    app: opensearch
+spec:
+  selector:
+    app: opensearch
+  ports:
+    - name: http
+      port: 9200        # port standard OpenSearch/Elasticsearch (HTTP REST API)
+      targetPort: 9200
+  type: ClusterIP
+
+
+---
+# Deployment OpenSearch
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch
+  namespace: logging
+  labels:
+    app: opensearch
+spec:
+  replicas: 1   # single-node : OpenSearch ne supporte pas le clustering sans licence
+
+  selector:
+    matchLabels:
+      app: opensearch
+
+  template:
+    metadata:
+      labels:
+        app: opensearch
+
+    spec:
+      # InitContainers : s'exécutent et se terminent AVANT le conteneur principal
+      initContainers:
+
+        # OpenSearch (et Elasticsearch) nécessite vm.max_map_count >= 262144
+        # pour les memory-mapped files (mmap) utilisés par Lucene.
+        # Ce paramètre kernel doit être modifié sur le NŒUD (pas dans le conteneur),
+        # d'où le mode privileged (accès root au nœud hôte).
+        - name: fix-vm-map
+          image: busybox:1.35
+          command: ["sysctl", "-w", "vm.max_map_count=262144"]
+          securityContext:
+            privileged: true   # nécessaire pour modifier les paramètres kernel
+
+        # OpenSearch tourne avec l'UID 1000 (utilisateur "opensearch")
+        # Les données sur le PVC appartiennent à root par défaut
+        # → chown pour que le processus OpenSearch puisse écrire ses index
+        - name: fix-permissions
+          image: busybox:1.35
+          command: ["chown", "-R", "1000:1000", "/usr/share/opensearch/data"]
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
+
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.13.0
+
+          ports:
+            - containerPort: 9200
+              name: http
+
+          env:
+            # Heap JVM : 512 Mo min et max (-Xms = min, -Xmx = max)
+            # Les mettre identiques évite les redimensionnements de heap
+            # qui causent des pauses GC. À ajuster selon la RAM disponible.
+            # Règle générale : ne pas dépasser 50% de la RAM du nœud
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+
+            # Désactive le plugin de sécurité (redondant avec opensearch.yml
+            # mais certaines versions lisent cette variable en premier)
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+
+            # Mode single-node (redondant mais explicite)
+            - name: discovery.type
+              value: single-node
+
+          volumeMounts:
+            # Volume de données des index (PVC 20 Gi)
+            - name: data
+              mountPath: /usr/share/opensearch/data
+
+            # Fichier de configuration (depuis le ConfigMap)
+            # subPath = monter un seul fichier du ConfigMap (pas tout le répertoire)
+            # Sans subPath, tout le répertoire /config serait remplacé par le ConfigMap
+            - name: config
+              mountPath: /usr/share/opensearch/config/opensearch.yml
+              subPath: opensearch.yml
+
+          resources:
+            requests:
+              memory: "768Mi"    # garanti : plus que la heap (512 Mo) + overhead JVM
+              cpu: "250m"        # 25% d'un cœur garanti
+            limits:
+              memory: "1536Mi"   # max : 3x la heap pour absorber les pics
+              cpu: "500m"        # 50% d'un cœur maximum
+
+          # Readiness : vérifie que l'index cluster est accessible
+          # /_cluster/health retourne 200 si le cluster est green ou yellow
+          # (red = problème de shards, le pod reste NotReady)
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 60    # OpenSearch met du temps à démarrer (JVM + index loading)
+            periodSeconds: 15
+            failureThreshold: 8        # patient : jusqu'à 2 minutes d'attente (8 × 15s)
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pvc-opensearch-logs
+        - name: config
+          configMap:
+            name: opensearch-config
+
+
+---
+# =============================================================
+# OPENSEARCH DASHBOARDS — Interface de visualisation des logs
+# =============================================================
+# Équivalent de Kibana pour OpenSearch.
+# Accessible via NodePort 30601 : http://<IP-nœud>:30601
+# Permet de créer des index patterns, des visualisations,
+# des dashboards et des alertes sur les logs collectés.
+# =============================================================
+
+
+# ConfigMap avec la configuration Dashboards
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboards-config
+  namespace: logging
+data:
+  opensearch_dashboards.yml: |
+    # Nom affiché dans l'interface et les logs du serveur
+    server.name: opensearch-dashboards
+
+    # Écouter sur toutes les interfaces (nécessaire dans un conteneur)
+    server.host: "0.0.0.0"
+
+    # URL du cluster OpenSearch backend
+    # Utilise le DNS K8s interne (pas besoin d'IP externe)
+    opensearch.hosts: ["http://opensearch.logging.svc.cluster.local:9200"]
+
+    # Désactive l'authentification (cohérent avec plugins.security.disabled: true dans OpenSearch)
+    opensearch_security.disabled: true
+
+
+---
+# Service Dashboards — exposé en NodePort pour l'accès externe
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-dashboards
+  namespace: logging
+  labels:
+    app: opensearch-dashboards
+spec:
+  selector:
+    app: opensearch-dashboards
+  ports:
+    - name: http
+      port: 5601           # port interne du Service (pour les pods dans le cluster)
+      targetPort: 5601     # port du conteneur Dashboards
+      nodePort: 30601      # port exposé sur CHAQUE nœud K8s (accès externe)
+                           # Accessible via : http://<IP-du-nœud>:30601
+  type: NodePort           # expose un port sur tous les nœuds du cluster
+
+
+---
+# Deployment OpenSearch Dashboards
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch-dashboards
+  namespace: logging
+  labels:
+    app: opensearch-dashboards
+spec:
+  replicas: 1
+
+  # 600s = 10 minutes : Dashboards est lent à démarrer (compilation des assets JS)
+  progressDeadlineSeconds: 600
+
+  selector:
+    matchLabels:
+      app: opensearch-dashboards
+
+  template:
+    metadata:
+      labels:
+        app: opensearch-dashboards
+
+    spec:
+      initContainers:
+        # Même problème de permissions que OpenSearch
+        # L'UID 1000 (utilisateur "opensearch-dashboards") doit pouvoir écrire
+        # dans le répertoire de données (plugins, cache, config générée)
+        - name: fix-permissions
+          image: busybox:1.35
+          command:
+            - sh
+            - -c
+            - chown -R 1000:1000 /usr/share/opensearch-dashboards/data
+          volumeMounts:
+            - name: dashboards-storage
+              mountPath: /usr/share/opensearch-dashboards/data
+
+      containers:
+        - name: dashboards
+          image: opensearchproject/opensearch-dashboards:2.13.0
+
+          ports:
+            - containerPort: 5601
+
+          env:
+            # URL OpenSearch (redondant avec le ConfigMap mais certaines
+            # versions de Dashboards lisent cette variable en priorité)
+            - name: OPENSEARCH_HOSTS
+              value: '["http://opensearch.logging.svc.cluster.local:9200"]'
+
+            # Désactiver le plugin de sécurité côté Dashboards
+            - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
+              value: "true"
+
+            # Limite la mémoire allouée au moteur V8 (Node.js)
+            # Sans cette limite, Dashboards peut consommer plusieurs Go de RAM
+            # 512 Mo est suffisant pour un usage modéré
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=512"
+
+          volumeMounts:
+            - name: dashboards-storage
+              mountPath: /usr/share/opensearch-dashboards/data
+            - name: config
+              mountPath: /usr/share/opensearch-dashboards/config/
+
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"    # cohérent avec --max-old-space-size=512
+              cpu: "250m"
+
+          # /api/status : endpoint de santé de Dashboards
+          # Retourne 200 quand Dashboards est connecté à OpenSearch et opérationnel
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: 5601
+            initialDelaySeconds: 90   # très long : Dashboards compile les assets au démarrage
+            periodSeconds: 15
+            failureThreshold: 8       # 2 minutes de tolérance (8 × 15s)
+
+      volumes:
+        - name: dashboards-storage
+          persistentVolumeClaim:
+            claimName: pvc-opensearch-dashboards
+        - name: config
+          configMap:
+            name: dashboards-config
+
+
+---
+# =============================================================
+# KUSTOMIZATION — Stack de logging complète
+# =============================================================
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# Namespace appliqué à toutes les ressources listées
 namespace: logging
 
+# Ordre des fichiers = ordre d'application recommandé :
+# 1. namespace (créer le namespace en premier)
+# 2. pv-pvc    (créer le stockage avant les pods qui en dépendent)
+# 3. opensearch (backend de stockage des logs)
+# 4. dashboards (frontend de visualisation)
+# 5. fluentbit  (collecteur — démarrer en dernier quand la cible est prête)
 resources:
   - namespace.yaml
   - pv-pvc.yaml
@@ -10,10 +571,12 @@ resources:
   - dashboards.yaml
   - fluentbit.yaml
 
+# Labels ajoutés à TOUTES les ressources de ce Kustomization
 labels:
   - pairs:
-      project: gestion-de-stage
-      component: logging
-      managed-by: kustomize
-    includeSelectors: false
-    includeTemplates: true
+      project: gestion-de-stage       # identifie le projet dans les dashboards K8s
+      component: logging              # composant fonctionnel
+      managed-by: kustomize           # indique l'outil de gestion (pas Helm, pas kubectl raw)
+    includeSelectors: false   # ne PAS ajouter ces labels aux sélecteurs des Services/Deployments
+                              # (ça casserait les sélecteurs existants)
+    includeTemplates: true    # ajouter ces labels aux templates de pods (metadata.labels)
