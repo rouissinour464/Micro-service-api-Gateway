@@ -1,72 +1,47 @@
-
-# =============================================================
-# APPLICATION 1 : FRONTEND (React + Nginx)
-# =============================================================
 apiVersion: argoproj.io/v1alpha1
-kind: Application         # ressource custom définie par ArgoCD (CRD)
+kind: Application
 metadata:
-  name: frontend-auth     # nom de l'Application dans ArgoCD UI
-  namespace: argocd       # ArgoCD tourne dans son propre namespace
- 
+  name: frontend-auth
+  namespace: argocd
   finalizers:
-    # Finalizer de suppression : quand cette Application est supprimée,
-    # ArgoCD supprime aussi toutes les ressources K8s qu'elle gère
-    # (pods, services, configmaps…). Retire le finalizer pour conserver
-    # les ressources après suppression de l'Application ArgoCD.
     - resources-finalizer.argocd.argoproj.io
- 
+
 spec:
-  project: default        # projet ArgoCD (contrôle les permissions, clusters autorisés)
- 
+  project: default
+
   source:
-    # Dépôt Git contenant les manifests Kubernetes du frontend
     repoURL: https://github.com/rouissinour464/Micro-service-front.git
- 
-    # Branche/tag/commit à synchroniser
-    # "v2" = tag Git stable — ArgoCD surveille ce tag
-    # (HEAD = dernier commit de la branche par défaut)
     targetRevision: v2
- 
-    # Chemin dans le dépôt Git contenant les fichiers K8s
-    # ArgoCD cherche soit des manifests YAML, soit un kustomization.yaml
     path: k8s/app
- 
+
   destination:
-    # Cluster cible — kubernetes.default.svc = le cluster local d'ArgoCD
-    # (on pourrait pointer vers un cluster distant avec une URL différente)
     server: https://kubernetes.default.svc
- 
-    # Namespace Kubernetes où déployer les ressources
     namespace: gestion-projet
- 
+
   syncPolicy:
     automated:
-      # prune: true = supprimer du cluster les ressources qui ont été
-      # supprimées dans Git (ex: si on retire un Deployment du repo,
-      # ArgoCD le supprime aussi du cluster)
       prune: true
- 
-      # selfHeal: true = si quelqu'un modifie manuellement une ressource
-      # dans le cluster (kubectl edit), ArgoCD la remet dans l'état Git
-      # Garantit que Git reste la seule source de vérité
-      selfHeal: true
- 
+      selfHeal: false      # ← était true — Argo Rollouts gère l'état des pods
     syncOptions:
-      # Créer le namespace s'il n'existe pas encore
       - CreateNamespace=true
- 
-      # ServerSideApply: utilise l'API Server K8s pour appliquer les manifests
-      # au lieu de kubectl client-side. Gère mieux les CRDs et les conflits
-      # de champs entre plusieurs controllers
       - ServerSideApply=true
- 
+      - RespectIgnoreDifferences=true   # ← ajouter ceci
     retry:
-      # Nombre de tentatives si la sync échoue (ex: pod qui ne démarre pas)
       limit: 3
       backoff:
-        # Attente entre les tentatives — augmente exponentiellement
-        duration: 5s      # 1ère retry : attendre 5s
-        factor: 2         # 2ème retry : 10s, 3ème retry : 20s
-        maxDuration: 1m   # plafond : jamais plus d'1 minute d'attente
- 
- 
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+
+  # Dire à ArgoCD d'ignorer les champs que Argo Rollouts modifie
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/replicas
+        - /spec/template
+        - /status
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/selector
