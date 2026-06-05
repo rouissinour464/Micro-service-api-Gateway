@@ -16,16 +16,14 @@ pipeline {
     }
 
     environment {
-        REGISTRY   = "nour292"
-        IMAGE      = "${REGISTRY}/api-gateway"
-        TAG        = "${BUILD_NUMBER}"
-        KUBECONFIG = "/var/lib/jenkins/.kube/config"
-        NAMESPACE  = "gestion-projet"
-        LOGGING_NS = "logging"
-
-        SONAR_PROJECT_KEY = "rouissinour464_micro-service-api-gateway"
-        SONAR_ORG         = "rouissinour464"
-
+        REGISTRY           = "nour292"
+        IMAGE              = "${REGISTRY}/api-gateway"
+        TAG                = "${BUILD_NUMBER}"
+        KUBECONFIG         = "/var/lib/jenkins/.kube/config"
+        NAMESPACE          = "gestion-projet"
+        LOGGING_NS         = "logging"
+        SONAR_PROJECT_KEY  = "rouissinour464_micro-service-api-gateway"
+        SONAR_ORG          = "rouissinour464"
         GIT_CREDENTIALS_ID = "github-creds"
         GIT_USER_EMAIL     = "jenkins@ci.local"
         GIT_USER_NAME      = "Jenkins CI"
@@ -33,15 +31,11 @@ pipeline {
 
     stages {
 
-        // ============================================================
         stage('Checkout') {
-        // ============================================================
             steps { checkout scm }
         }
 
-        // ============================================================
         stage('Unit Tests') {
-        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -51,9 +45,7 @@ pipeline {
             }
         }
 
-        // ============================================================
         stage('Integration Tests') {
-        // ============================================================
             steps {
                 sh '''
                     set -eux
@@ -62,12 +54,13 @@ pipeline {
             }
         }
 
-        // ============================================================
         stage('SonarCloud Analysis') {
-        // ============================================================
             steps {
                 withSonarQubeEnv('SonarCloud') {
-                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    withCredentials([string(
+                        credentialsId: 'sonar-token',
+                        variable: 'SONAR_TOKEN'
+                    )]) {
                         sh '''
                             set -eux
                             ./mvnw sonar:sonar \
@@ -81,9 +74,7 @@ pipeline {
             }
         }
 
-        // ============================================================
         stage('Quality Gate') {
-        // ============================================================
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: false
@@ -91,48 +82,40 @@ pipeline {
             }
         }
 
-        // ============================================================
-        stage('Docker Build') {
-        // ============================================================
+        stage('Docker Build & Push') {
             steps {
-                sh '''
-                    set -eux
-                    docker build -t ${IMAGE}:${TAG} .
-                '''
-            }
-        }
-
-        // ============================================================
-        stage('Docker Push') {
-        // ============================================================
-            steps {
-                withCredentials([string(credentialsId: 'dockerhub-pass', variable: 'DOCKER_PASSWORD')]) {
+                withCredentials([string(
+                    credentialsId: 'dockerhub-pass',
+                    variable: 'DOCKER_PASSWORD'
+                )]) {
                     sh '''
                         set -eux
-                        echo "$DOCKER_PASSWORD" | docker login -u ${REGISTRY} --password-stdin
-                        docker push ${IMAGE}:${TAG}
+                        docker build -t ${IMAGE}:${TAG} .
                         docker tag  ${IMAGE}:${TAG} ${IMAGE}:latest
+
+                        echo "$DOCKER_PASSWORD" | \
+                            docker login -u ${REGISTRY} --password-stdin
+                        docker push ${IMAGE}:${TAG}
                         docker push ${IMAGE}:latest
                         docker logout
+
+                        docker rmi ${IMAGE}:${TAG} ${IMAGE}:latest || true
                     '''
                 }
             }
         }
 
-        // ============================================================
         stage('Check Cluster') {
-        // ============================================================
             steps {
-                sh '''
-                    set -eux
-                    kubectl get nodes
-                '''
+                sh 'kubectl get nodes'
             }
         }
 
-        // ============================================================
-        stage('Update Image Tag') {
-        // ============================================================
+        // ─────────────────────────────────────────
+        // Met à jour kustomization.yaml → git push
+        // ArgoCD détecte et deploy automatiquement
+        // ─────────────────────────────────────────
+        stage('Update Git Tag') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: "${GIT_CREDENTIALS_ID}",
@@ -150,301 +133,161 @@ pipeline {
                             k8s/app/kustomization.yaml
 
                         git add k8s/app/kustomization.yaml
-                        git commit -m "ci: update api-gateway image tag to ${TAG} [skip ci]" || true
+                        git diff --cached --quiet && \
+                            echo "Pas de changement — skip" && exit 0
+
+                        git commit -m "ci: api-gateway → ${TAG} [skip ci]"
 
                         REMOTE=$(git remote get-url origin \
                             | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
-                        git push "$REMOTE" HEAD:v2
+                        git push "$REMOTE" HEAD:v2 --force-with-lease
                     '''
                 }
             }
         }
 
-        // ============================================================
-        stage('Deploy via Kustomize') {
-        // ============================================================
-            steps {
-                sh '''
-                    set -eux
-
-                    # ── 1. Vérifier les fichiers k8s ─────────────────────────
-                    echo "📂 Contenu de k8s/app :"
-                    ls -la k8s/app/
-
-                    # ── 2. Debug : afficher le rendu Kustomize final ─────────
-                    echo "🔍 Manifestes générés par Kustomize :"
-                    kubectl kustomize k8s/app
-
-                    # ── 3. Créer le namespace s'il n'existe pas ──────────────
-                    kubectl create namespace ${NAMESPACE} \
-                        --dry-run=client -o yaml | kubectl apply -f -
-
-                    # ── 4. Appliquer tout le stack via Kustomize ─────────────
-                    echo "🚀 Déploiement via Kustomize..."
-                    kubectl apply -k k8s/app
-
-                    # ── 5. Attendre que le Deployment soit prêt ──────────────
-                    echo "⏳ Attente du rollout..."
-                    kubectl rollout status deployment/gateway-service \
-                        -n ${NAMESPACE} --timeout=120s
-
-                    echo "✅ Déploiement api-gateway terminé"
-                '''
-            }
-        }
-
-        // ============================================================
+        // ─────────────────────────────────────────
+        // Appliquer les ArgoCD Applications
+        // UNE SEULE FOIS suffit — mais idempotent
+        // enregistre front, gateway, user dans ArgoCD
+        // ─────────────────────────────────────────
         stage('Apply ArgoCD Apps') {
-        // ============================================================
             steps {
                 sh '''
                     set -eux
                     kubectl apply -f k8s/argocd/ -n argocd
-                    echo "✅ ArgoCD apps applied"
-                    argocd app list --grpc-web || true
+                    echo "ArgoCD apps enregistrées"
                 '''
             }
         }
 
-        // ============================================================
-        stage('Refresh ArgoCD Cache') {
-        // ============================================================
-            steps {
-                sh '''
-                    set -eux
-                    kubectl rollout restart deployment argocd-repo-server -n argocd
-                '''
-            }
-        }
-
-        // ============================================================
-        stage('Force Sync ArgoCD') {
-        // ============================================================
-            steps {
-                sh '''
-                    set -eux
-                    argocd app sync api-gateway --grpc-web || true
-                '''
-            }
-        }
-
-        // ============================================================
-        stage('Debug Kustomize') {
-        // ============================================================
-            steps {
-                sh '''
-                    set -eux
-                    echo "🔍 Debug Kustomize"
-                    kustomize build k8s/app || true
-                '''
-            }
-        }
-
-        // ============================================================
+        // ─────────────────────────────────────────
+        // ArgoCD sync automatique via Git
+        // On attend juste que le deploy soit sain
+        // ─────────────────────────────────────────
         stage('Wait ArgoCD Sync') {
-        // ============================================================
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     sh '''
                         set -eux
+                        echo "Attente sync ArgoCD (30s)..."
+                        sleep 30
+
                         argocd app wait api-gateway \
-                            --sync --health --timeout 240 --grpc-web || true
+                            --sync --health \
+                            --timeout 240 \
+                            --grpc-web || true
+
                         argocd app get api-gateway --grpc-web || true
                     '''
                 }
             }
         }
 
-        // ============================================================
+        // ─────────────────────────────────────────
+        // Logging — déployé seulement si absent
+        // ─────────────────────────────────────────
         stage('Deploy Logging') {
-        // ============================================================
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
                     sh '''
                         set -eux
 
-                        # ── 0. Vérifier si le logging est déjà déployé et sain ────
                         OPENSEARCH_READY=$(kubectl get deployment opensearch \
                             -n ${LOGGING_NS} \
-                            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                            -o jsonpath='{.status.readyReplicas}' \
+                            2>/dev/null || echo "0")
                         DASHBOARDS_READY=$(kubectl get deployment opensearch-dashboards \
                             -n ${LOGGING_NS} \
-                            -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+                            -o jsonpath='{.status.readyReplicas}' \
+                            2>/dev/null || echo "0")
 
-                        echo "OpenSearch ready replicas   : $OPENSEARCH_READY"
-                        echo "Dashboards ready replicas   : $DASHBOARDS_READY"
-
-                        if [ "$OPENSEARCH_READY" -ge 1 ] && [ "$DASHBOARDS_READY" -ge 1 ]; then
-                            echo "✅ Logging déjà UP et sain — aucune action (dashboards préservés)"
+                        if [ "$OPENSEARCH_READY" -ge 1 ] && \
+                           [ "$DASHBOARDS_READY" -ge 1 ]; then
+                            echo "Logging deja UP — skip"
                             exit 0
                         fi
 
-                        echo "⚙️  Logging absent ou dégradé — déploiement en cours..."
+                        echo "Deploiement logging..."
 
-                        # ── 1. Namespace ──────────────────────────────────────────
                         kubectl create namespace ${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        # ── 2. Secret OpenSearch (idempotent) ─────────────────────
                         kubectl create secret generic opensearch-credentials \
                             --from-literal=username="admin" \
                             --from-literal=password="admin" \
                             --namespace=${LOGGING_NS} \
                             --dry-run=client -o yaml | kubectl apply -f -
 
-                        # ── 3. Libérer uniquement les PVs Released ────────────────
-                        echo "🔧 Vérification des PVs..."
-                        for PV in pv-opensearch-logs pv-opensearch-dashboards pv-fluentbit-db; do
+                        for PV in pv-opensearch-logs \
+                                  pv-opensearch-dashboards \
+                                  pv-fluentbit-db; do
                             STATUS=$(kubectl get pv $PV \
-                                -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                            echo "  PV $PV : $STATUS"
+                                -o jsonpath='{.status.phase}' \
+                                2>/dev/null || echo "NotFound")
                             if [ "$STATUS" = "Released" ]; then
                                 kubectl patch pv $PV --type=json \
-                                    -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
+                                    -p='[{"op":"remove","path":"/spec/claimRef"}]' \
+                                    || true
                             fi
                         done
 
-                        # ── 4. Vérification PVCs ──────────────────────────────────
-                        echo "🔍 Vérification des selectors PVC..."
-
-                        check_and_fix_pvc() {
-                            PVC_NAME=$1
-                            LABEL_VAL=$2
-                            NS=${LOGGING_NS}
-
-                            if [ "$PVC_NAME" = "pvc-opensearch-dashboards" ]; then
-                                echo "  🔒 $PVC_NAME : protégé — jamais supprimé"
-                                return
-                            fi
-
-                            EXISTS=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
-                                --ignore-not-found \
-                                -o jsonpath='{.metadata.name}' 2>/dev/null || echo "")
-
-                            if [ -z "$EXISTS" ]; then
-                                echo "  ✅ $PVC_NAME : absent → sera créé par apply"
-                                return
-                            fi
-
-                            CURRENT=$(kubectl get pvc "$PVC_NAME" -n "$NS" \
-                                -o json 2>/dev/null \
-                                | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-labels = data.get('spec', {}).get('selector', {}).get('matchLabels', {})
-print(labels.get('volume-for', ''))
-" 2>/dev/null || echo "")
-
-                            echo "  📋 $PVC_NAME : selector actuel='$CURRENT' attendu='$LABEL_VAL'"
-
-                            if [ "$CURRENT" = "$LABEL_VAL" ]; then
-                                echo "  ✅ $PVC_NAME : selector OK → conservé"
-                            else
-                                echo "  ⚠️  $PVC_NAME : selector incorrect → recréation"
-                                kubectl delete pvc "$PVC_NAME" -n "$NS" \
-                                    --ignore-not-found=true
-                                kubectl wait --for=delete "pvc/$PVC_NAME" \
-                                    -n "$NS" --timeout=60s || true
-
-                                PV_NAME="pv-$(echo $PVC_NAME | sed 's/^pvc-//')"
-                                PV_ST=$(kubectl get pv "$PV_NAME" \
-                                    -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-                                if [ "$PV_ST" = "Released" ]; then
-                                    kubectl patch pv "$PV_NAME" --type=json \
-                                        -p='[{"op":"remove","path":"/spec/claimRef"}]' || true
-                                fi
-                            fi
-                        }
-
-                        check_and_fix_pvc "pvc-opensearch-logs"       "opensearch-logs"
-                        check_and_fix_pvc "pvc-opensearch-dashboards"  "opensearch-dashboards"
-                        check_and_fix_pvc "pvc-fluentbit-db"           "fluentbit-db"
-
-                        # ── 5. Appliquer PVs + PVCs ───────────────────────────────
-                        echo "📦 Application pv-pvc.yaml..."
                         kubectl apply -f k8s/logging/pv-pvc.yaml
-
-                        # ── 6. Appliquer tout le stack logging ────────────────────
-                        echo "🚀 Application kustomize logging..."
                         kubectl apply -k k8s/logging
                     '''
                 }
             }
         }
 
-        // ============================================================
         stage('Wait Logging Ready') {
-        // ============================================================
             steps {
                 sh '''
-                    set -eux
                     kubectl rollout status deployment/opensearch \
                         -n ${LOGGING_NS} --timeout=180s || true
                     kubectl rollout status deployment/opensearch-dashboards \
                         -n ${LOGGING_NS} --timeout=180s || true
-                    echo "✅ Logging stack déployé"
+                    echo "Logging stack OK"
                 '''
             }
         }
 
-        // ============================================================
         stage('Check Pods') {
-        // ============================================================
             steps {
                 sh '''
-                    set -eux
+                    echo "=== Pods gestion-projet ==="
                     kubectl get pods -n ${NAMESPACE}
+
+                    echo "=== Pods logging ==="
                     kubectl get pods -n ${LOGGING_NS}
-                    kubectl get pvc  -n ${LOGGING_NS}
-                    kubectl get pv | grep logging-local || true
+
+                    echo "=== ArgoCD Apps ==="
+                    kubectl get applications -n argocd || true
                 '''
             }
         }
-
-        // ============================================================
-        stage('Check Logs Pipeline') {
-        // ============================================================
-            steps {
-                sh '''
-                    set -eux
-                    kubectl run log-test \
-                        --image=busybox --restart=Never \
-                        -- echo "hello logs" || true
-                    sleep 5
-
-                    kubectl port-forward \
-                        -n ${LOGGING_NS} svc/opensearch 9200:9200 \
-                        > /dev/null 2>&1 &
-                    sleep 5
-
-                    curl -s localhost:9200/_cat/indices?v || true
-
-                    kubectl delete pod log-test --ignore-not-found=true
-                    pkill -f "port-forward.*9200" || true
-                '''
-            }
-        }
-
-    } // end stages
+    }
 
     post {
         success {
-            echo "✅ PIPELINE SUCCESS 🚀"
+            echo "SUCCES — api-gateway:${TAG} deploye"
         }
         failure {
-            echo "❌ PIPELINE FAILED"
             sh '''
-                kubectl get pods -A || true
+                echo "=== Pods ==="
+                kubectl get pods -n ${NAMESPACE} || true
+
+                echo "=== Events ==="
+                kubectl get events -n ${NAMESPACE} \
+                    --sort-by=.lastTimestamp | tail -20 || true
+
+                echo "=== ArgoCD ==="
+                argocd app get api-gateway --grpc-web || true
+
+                echo "=== Logs logging ==="
                 kubectl logs -l app=opensearch \
-                    -n logging --tail=100 || true
-                kubectl logs -l app=opensearch-dashboards \
-                    -n logging --tail=100 || true
-                kubectl logs -l app=fluent-bit \
-                    -n logging --tail=100 || true
+                    -n logging --tail=50 || true
             '''
         }
-        always {
-            cleanWs()
-        }
+        always { cleanWs() }
     }
 }
