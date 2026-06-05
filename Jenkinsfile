@@ -111,10 +111,6 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────
-        // Met à jour kustomization.yaml → git push
-        // ArgoCD détecte et deploy automatiquement
-        // ─────────────────────────────────────────
         stage('Update Git Tag') {
             steps {
                 withCredentials([usernamePassword(
@@ -127,9 +123,13 @@ pipeline {
                         git config user.email "${GIT_USER_EMAIL}"
                         git config user.name  "${GIT_USER_NAME}"
 
-                        git checkout -B v2
+                        REMOTE=$(git remote get-url origin \
+                            | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
 
-                        sed -i "/name: nour292\\/api-gateway/{n;s/newTag:.*/newTag: \\"${TAG}\\"/}" \
+                        git fetch "$REMOTE" v2
+                        git checkout -B v2 FETCH_HEAD
+
+                        sed -i 's|newTag:.*|newTag: "'"${TAG}"'"|g' \
                             k8s/app/kustomization.yaml
 
                         git add k8s/app/kustomization.yaml
@@ -138,19 +138,14 @@ pipeline {
 
                         git commit -m "ci: api-gateway → ${TAG} [skip ci]"
 
-                        REMOTE=$(git remote get-url origin \
-                            | sed "s|https://|https://${GIT_USER}:${GIT_TOKEN}@|")
                         git push "$REMOTE" HEAD:v2 --force-with-lease
+
+                        echo "Git mis à jour — ArgoCD va sync automatiquement"
                     '''
                 }
             }
         }
 
-        // ─────────────────────────────────────────
-        // Appliquer les ArgoCD Applications
-        // UNE SEULE FOIS suffit — mais idempotent
-        // enregistre front, gateway, user dans ArgoCD
-        // ─────────────────────────────────────────
         stage('Apply ArgoCD Apps') {
             steps {
                 sh '''
@@ -161,10 +156,6 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────
-        // ArgoCD sync automatique via Git
-        // On attend juste que le deploy soit sain
-        // ─────────────────────────────────────────
         stage('Wait ArgoCD Sync') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
@@ -184,9 +175,6 @@ pipeline {
             }
         }
 
-        // ─────────────────────────────────────────
-        // Logging — déployé seulement si absent
-        // ─────────────────────────────────────────
         stage('Deploy Logging') {
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
