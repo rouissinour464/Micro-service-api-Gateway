@@ -138,7 +138,7 @@ pipeline {
 
                         git commit -m "ci: api-gateway → ${TAG} [skip ci]"
 
-                        git push "$REMOTE" HEAD:v2 --force-with-lease
+                        git push "$REMOTE" HEAD:v2 --force
 
                         echo "Git mis à jour — ArgoCD va sync automatiquement"
                     '''
